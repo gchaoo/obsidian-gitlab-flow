@@ -1,0 +1,9 @@
+{
+  "id": "obsidian-gitlab-flow",
+  "name": "obsidian-gitlab-flow",
+  "version": "0.2.0",
+  "minAppVersion": "1.5.0",
+  "description": "Obsidian 与 GitLab 的协同流转插件，支持任务发布、线上纪要整理、会议纪要同步。",
+  "author": "gch",
+  "isDesktopOnly": true
+}
