@@ -17,3 +17,10 @@ test("settings labels appear in the expected order", () => {
     "线上记录字段名",
   ]);
 });
+
+test("runtime plugin entry does not require local helper modules", () => {
+  const source = fs.readFileSync(MAIN_JS_PATH, "utf8");
+
+  assert.equal(source.includes('require("./'), false);
+  assert.equal(source.includes("require('./"), false);
+});
