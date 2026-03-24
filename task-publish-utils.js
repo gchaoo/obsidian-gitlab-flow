@@ -143,6 +143,62 @@ function buildTaskTimeRange(startDate, endDate) {
   return `${startDate.raw}～${endDate.raw}`;
 }
 
+function buildWorkItemId(issue) {
+  const issueId = Number(issue?.id);
+  if (!Number.isInteger(issueId) || issueId <= 0) {
+    throw new Error("GitLab 未返回有效的 issue id，无法同步开始日期和结束日期。");
+  }
+  return `gid://gitlab/WorkItem/${issueId}`;
+}
+
+function buildWorkItemDateSyncPayload(issue, metadata) {
+  return {
+    operationName: "workItemUpdate",
+    variables: {
+      input: {
+        id: buildWorkItemId(issue),
+        startAndDueDateWidget: {
+          isFixed: true,
+          startDate: metadata.startDate.raw,
+          dueDate: metadata.endDate.raw,
+        },
+      },
+    },
+    query: [
+      "mutation workItemUpdate($input: WorkItemUpdateInput!) {",
+      "  workItemUpdate(input: $input) {",
+      "    workItem {",
+      "      id",
+      "    }",
+      "    errors",
+      "  }",
+      "}",
+    ].join("\n"),
+  };
+}
+
+function buildPlmTaskName(metadata) {
+  const segments = [];
+  const contract = metadata.contract ? `【${metadata.contract}】` : "";
+  const software = metadata.software ? `【${metadata.software}】` : "";
+  const taskType = String(metadata.taskType || "").trim();
+  const normalizedTaskName = stripArticleDatePrefix(metadata.taskName);
+  if (!taskType) {
+    throw new Error("任务安排表格中的 任务类型 为必填项。");
+  }
+
+  if (contract) {
+    segments.push(contract);
+  }
+  if (software) {
+    segments.push(software);
+  }
+  segments.push(
+    `${normalizedTaskName}_${taskType}_${metadata.startDate.year}${metadata.startDate.month}${metadata.startDate.day}`,
+  );
+  return segments.join("");
+}
+
 function extractAssigneeNamesFromLastTaskScheduleTable(body) {
   const { headerCells, rows } = getLastTaskScheduleTable(body);
   const executorIndex = headerCells.indexOf("执行人");
@@ -169,23 +225,32 @@ function updateLastTaskScheduleTable(body, metadata) {
   }
 
   const plmTaskNameIndex = headerCells.indexOf("PLM任务名称");
-  const normalizedHeaderCells =
-    plmTaskNameIndex >= 0
-      ? headerCells.filter((_, index) => index !== plmTaskNameIndex)
-      : [...headerCells];
-  const timeRangeIndex = normalizedHeaderCells.indexOf("时间范围");
+  if (plmTaskNameIndex < 0) {
+    throw new Error("任务安排表格缺少 PLM任务名称 列。");
+  }
+
+  const taskTypeIndex = headerCells.indexOf("任务类型");
+  if (taskTypeIndex < 0) {
+    throw new Error("任务安排表格缺少必要列。");
+  }
+
+  const timeRangeIndex = headerCells.indexOf("时间范围");
   if (timeRangeIndex < 0) {
     throw new Error("任务安排表格缺少必要列。");
   }
 
-  lines[headerIndex] = formatTableRow(normalizedHeaderCells);
-  lines[headerIndex + 1] = formatTableSeparator(normalizedHeaderCells.length);
+  lines[headerIndex] = formatTableRow(headerCells);
+  lines[headerIndex + 1] = formatTableSeparator(headerCells.length);
   for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
     const dataRowIndex = headerIndex + 2 + rowIndex;
-    const dataCells =
-      plmTaskNameIndex >= 0
-        ? rows[rowIndex].filter((_, index) => index !== plmTaskNameIndex)
-        : [...rows[rowIndex]];
+    const dataCells = [...rows[rowIndex]];
+    dataCells[plmTaskNameIndex] = buildPlmTaskName({
+      taskName: metadata.taskName,
+      contract: metadata.contract,
+      software: metadata.software,
+      startDate: metadata.startDate,
+      taskType: dataCells[taskTypeIndex],
+    });
     dataCells[timeRangeIndex] = buildTaskTimeRange(metadata.startDate, metadata.endDate);
     lines[dataRowIndex] = formatTableRow(dataCells);
   }
@@ -264,7 +329,10 @@ module.exports = {
   normalizeSoftwareProjectMappingsSetting,
   parseSoftwareProjectMappings,
   parseGitLabProjectUrl,
+  buildPlmTaskName,
   buildTaskTimeRange,
+  buildWorkItemId,
+  buildWorkItemDateSyncPayload,
   extractAssigneeNamesFromLastTaskScheduleTable,
   updateLastTaskScheduleTable,
 };

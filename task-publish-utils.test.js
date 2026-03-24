@@ -10,7 +10,10 @@ const {
   normalizeSoftwareProjectMappingsSetting,
   parseSoftwareProjectMappings,
   parseGitLabProjectUrl,
+  buildPlmTaskName,
   buildTaskTimeRange,
+  buildWorkItemId,
+  buildWorkItemDateSyncPayload,
   extractAssigneeNamesFromLastTaskScheduleTable,
   updateLastTaskScheduleTable,
 } = require("./task-publish-utils");
@@ -126,7 +129,95 @@ test("buildTaskTimeRange uses the new formatting", () => {
   assert.equal(buildTaskTimeRange(startDate, endDate), "2026-03-20～2026-03-25");
 });
 
-test("updateLastTaskScheduleTable removes PLM task name column and updates time range for every row in the last matching table", () => {
+test("buildWorkItemId converts issue id into GitLab WorkItem gid", () => {
+  assert.equal(buildWorkItemId({ id: 55444 }), "gid://gitlab/WorkItem/55444");
+  assert.throws(() => buildWorkItemId({ id: "" }), /issue id/);
+});
+
+test("buildWorkItemDateSyncPayload includes start and due dates for work item update mutation", () => {
+  const payload = buildWorkItemDateSyncPayload(
+    { id: 55444 },
+    {
+      startDate: { raw: "2026-03-24", year: "2026", month: "03", day: "24" },
+      endDate: { raw: "2026-03-31", year: "2026", month: "03", day: "31" },
+    },
+  );
+
+  assert.equal(payload.operationName, "workItemUpdate");
+  assert.deepEqual(payload.variables, {
+    input: {
+      id: "gid://gitlab/WorkItem/55444",
+      startAndDueDateWidget: {
+        isFixed: true,
+        startDate: "2026-03-24",
+        dueDate: "2026-03-31",
+      },
+    },
+  });
+  assert.match(payload.query, /mutation workItemUpdate/);
+  assert.match(payload.query, /errors/);
+});
+
+test("buildPlmTaskName uses contract, software, task name, row task type, and start date", () => {
+  const startDate = { raw: "2026-03-20", year: "2026", month: "03", day: "20" };
+
+  assert.equal(
+    buildPlmTaskName({
+      contract: "合同A",
+      software: "系统B",
+      taskName: "收益测算",
+      startDate,
+      taskType: "开发",
+    }),
+    "【合同A】【系统B】收益测算_开发_20260320",
+  );
+
+  assert.equal(
+    buildPlmTaskName({
+      contract: "",
+      software: "系统B",
+      taskName: "收益测算",
+      startDate,
+      taskType: "开发",
+    }),
+    "【系统B】收益测算_开发_20260320",
+  );
+
+  assert.equal(
+    buildPlmTaskName({
+      contract: "合同A",
+      software: "",
+      taskName: "收益测算",
+      startDate,
+      taskType: "开发",
+    }),
+    "【合同A】收益测算_开发_20260320",
+  );
+
+  assert.equal(
+    buildPlmTaskName({
+      contract: "",
+      software: "",
+      taskName: "收益测算",
+      startDate,
+      taskType: "开发",
+    }),
+    "收益测算_开发_20260320",
+  );
+
+  assert.equal(
+    buildPlmTaskName({
+      contract: "",
+      software: "排班管理",
+      taskName: "2026-03-24 基础框架",
+      startDate,
+      taskType: "2D设计",
+    }),
+    "【排班管理】基础框架_2D设计_20260320",
+  );
+});
+
+test("updateLastTaskScheduleTable keeps PLM task name column and updates plm task names and time range for every row", () => {
   const original = [
     "## 任务安排",
     "",
@@ -153,10 +244,53 @@ test("updateLastTaskScheduleTable removes PLM task name column and updates time 
   const lastSection = updated.split("## 其他说明")[1];
 
   assert.match(updated, /\| 旧任务 \| 张三 \| 2h \| 开发 \| 郭程豪 \| 2026-03-01～2026-03-02 \|/);
-  assert.doesNotMatch(lastSection, /\| PLM任务名称 \| 执行人 \| 计划工时 \| 任务类型 \| 确认人 \| 时间范围 \|/);
-  assert.match(lastSection, /\| 执行人 \| 计划工时 \| 任务类型 \| 确认人 \| 时间范围 \|/);
-  assert.match(lastSection, /\| 李四 \| 2h \| 开发 \| 郭程豪 \| 2026-03-20～2026-03-25 \|/);
-  assert.match(lastSection, /\| 王五 \| 3h \| 测试 \| 郭程豪 \| 2026-03-20～2026-03-25 \|/);
+  assert.match(lastSection, /\| PLM任务名称 \| 执行人 \| 计划工时 \| 任务类型 \| 确认人 \| 时间范围 \|/);
+  assert.match(lastSection, /\| 【合同A】【系统B】收益测算_开发_20260320 \| 李四 \| 2h \| 开发 \| 郭程豪 \| 2026-03-20～2026-03-25 \|/);
+  assert.match(lastSection, /\| 【合同A】【系统B】收益测算_测试_20260320 \| 王五 \| 3h \| 测试 \| 郭程豪 \| 2026-03-20～2026-03-25 \|/);
+});
+
+test("updateLastTaskScheduleTable throws when task schedule table lacks PLM task name column", () => {
+  const original = [
+    "## 任务安排",
+    "",
+    "| 执行人 | 计划工时 | 任务类型 | 确认人 | 时间范围 |",
+    "| --- | ---- | ---- | --- | ---- |",
+    "| 李四 | 2h | 开发 | 郭程豪 |      |",
+    "",
+  ].join("\n");
+
+  assert.throws(
+    () => updateLastTaskScheduleTable(original, {
+      taskName: "收益测算",
+      contract: "合同A",
+      software: "系统B",
+      startDate: { raw: "2026-03-20", year: "2026", month: "03", day: "20" },
+      endDate: { raw: "2026-03-25", year: "2026", month: "03", day: "25" },
+    }),
+    /缺少 PLM任务名称 列/,
+  );
+});
+
+test("updateLastTaskScheduleTable throws when any row lacks task type", () => {
+  const original = [
+    "## 任务安排",
+    "",
+    "| PLM任务名称 | 执行人 | 计划工时 | 任务类型 | 确认人 | 时间范围 |",
+    "| --- | ---- | ---- | --- | ---- | ---- |",
+    "|  | 李四 | 2h |  | 郭程豪 |      |",
+    "",
+  ].join("\n");
+
+  assert.throws(
+    () => updateLastTaskScheduleTable(original, {
+      taskName: "收益测算",
+      contract: "合同A",
+      software: "系统B",
+      startDate: { raw: "2026-03-20", year: "2026", month: "03", day: "20" },
+      endDate: { raw: "2026-03-25", year: "2026", month: "03", day: "25" },
+    }),
+    /任务类型/,
+  );
 });
 
 test("extractAssigneeNamesFromLastTaskScheduleTable returns unique executor names from the last matching table", () => {

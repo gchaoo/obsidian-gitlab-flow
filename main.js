@@ -222,6 +222,7 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
           assigneeIds,
           labels,
         });
+    await this.syncIssueDates(issueTarget, token, issue, metadata);
     const issueUrl = issue?.web_url || this.buildIssueUrl(issueTarget, issue?.iid);
 
     if (!issueUrl) {
@@ -495,11 +496,7 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
   }
 
   encodeProjectPath(projectPath) {
-    return String(projectPath)
-      .replace(/^\/+|\/+$/g, "")
-      .split("/")
-      .map((segment) => encodeURIComponent(segment))
-      .join("%2F");
+    return encodeProjectPath(projectPath);
   }
 
   buildIssueUrl(target, issueIid) {
@@ -957,6 +954,49 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
     return response.json();
   }
 
+  async syncIssueDates(target, token, issue, metadata) {
+    const issueForSync = issue?.id ? issue : (target?.issueIid ? await this.getIssue(target, token) : issue);
+    const payload = buildWorkItemDateSyncPayload(issueForSync, metadata);
+    const response = await fetch(`${target.baseUrl}/api/graphql`, {
+      method: "POST",
+      headers: {
+        "PRIVATE-TOKEN": token,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const rawText = await response.text();
+    let result;
+    try {
+      result = rawText ? JSON.parse(rawText) : {};
+    } catch (_) {
+      throw new Error(`Issue 日期同步失败：${response.status} ${rawText}`);
+    }
+
+    if (!response.ok) {
+      throw new Error(`Issue 日期同步失败：${response.status} ${rawText}`);
+    }
+
+    const graphQLErrors = Array.isArray(result?.errors) ? result.errors : [];
+    if (graphQLErrors.length > 0) {
+      const message = graphQLErrors
+        .map((item) => String(item?.message || "").trim())
+        .filter(Boolean)
+        .join("；");
+      throw new Error(`Issue 日期同步失败：${message || rawText}`);
+    }
+
+    const mutationErrors = Array.isArray(result?.data?.workItemUpdate?.errors)
+      ? result.data.workItemUpdate.errors.filter(Boolean)
+      : [];
+    if (mutationErrors.length > 0) {
+      throw new Error(`Issue 日期同步失败：${mutationErrors.join("；")}`);
+    }
+
+    return result?.data?.workItemUpdate?.workItem || null;
+  }
+
   appendIssuePayloadOptions(payload, options = {}) {
     const assigneeIds = Array.isArray(options.assigneeIds) ? options.assigneeIds.filter(Boolean) : [];
     if (assigneeIds.length > 0) {
@@ -1344,6 +1384,62 @@ function buildTaskTimeRange(startDate, endDate) {
   return `${startDate.raw}～${endDate.raw}`;
 }
 
+function buildWorkItemId(issue) {
+  const issueId = Number(issue?.id);
+  if (!Number.isInteger(issueId) || issueId <= 0) {
+    throw new Error("GitLab 未返回有效的 issue id，无法同步开始日期和结束日期。");
+  }
+  return `gid://gitlab/WorkItem/${issueId}`;
+}
+
+function buildWorkItemDateSyncPayload(issue, metadata) {
+  return {
+    operationName: "workItemUpdate",
+    variables: {
+      input: {
+        id: buildWorkItemId(issue),
+        startAndDueDateWidget: {
+          isFixed: true,
+          startDate: metadata.startDate.raw,
+          dueDate: metadata.endDate.raw,
+        },
+      },
+    },
+    query: [
+      "mutation workItemUpdate($input: WorkItemUpdateInput!) {",
+      "  workItemUpdate(input: $input) {",
+      "    workItem {",
+      "      id",
+      "    }",
+      "    errors",
+      "  }",
+      "}",
+    ].join("\n"),
+  };
+}
+
+function buildPlmTaskName(metadata) {
+  const segments = [];
+  const contract = metadata.contract ? `【${metadata.contract}】` : "";
+  const software = metadata.software ? `【${metadata.software}】` : "";
+  const taskType = String(metadata.taskType || "").trim();
+  const normalizedTaskName = stripArticleDatePrefix(metadata.taskName);
+  if (!taskType) {
+    throw new Error("任务安排表格中的 任务类型 为必填项。");
+  }
+
+  if (contract) {
+    segments.push(contract);
+  }
+  if (software) {
+    segments.push(software);
+  }
+  segments.push(
+    `${normalizedTaskName}_${taskType}_${metadata.startDate.year}${metadata.startDate.month}${metadata.startDate.day}`,
+  );
+  return segments.join("");
+}
+
 function extractAssigneeNamesFromLastTaskScheduleTable(body) {
   const { headerCells, rows } = getLastTaskScheduleTable(body);
   const executorIndex = headerCells.indexOf("执行人");
@@ -1370,23 +1466,32 @@ function updateLastTaskScheduleTable(body, metadata) {
   }
 
   const plmTaskNameIndex = headerCells.indexOf("PLM任务名称");
-  const normalizedHeaderCells =
-    plmTaskNameIndex >= 0
-      ? headerCells.filter((_, index) => index !== plmTaskNameIndex)
-      : [...headerCells];
-  const timeRangeIndex = normalizedHeaderCells.indexOf("时间范围");
+  if (plmTaskNameIndex < 0) {
+    throw new Error("任务安排表格缺少 PLM任务名称 列。");
+  }
+
+  const taskTypeIndex = headerCells.indexOf("任务类型");
+  if (taskTypeIndex < 0) {
+    throw new Error("任务安排表格缺少必要列。");
+  }
+
+  const timeRangeIndex = headerCells.indexOf("时间范围");
   if (timeRangeIndex < 0) {
     throw new Error("任务安排表格缺少必要列。");
   }
 
-  lines[headerIndex] = formatTableRow(normalizedHeaderCells);
-  lines[headerIndex + 1] = formatTableSeparator(normalizedHeaderCells.length);
+  lines[headerIndex] = formatTableRow(headerCells);
+  lines[headerIndex + 1] = formatTableSeparator(headerCells.length);
   for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
     const dataRowIndex = headerIndex + 2 + rowIndex;
-    const dataCells =
-      plmTaskNameIndex >= 0
-        ? rows[rowIndex].filter((_, index) => index !== plmTaskNameIndex)
-        : [...rows[rowIndex]];
+    const dataCells = [...rows[rowIndex]];
+    dataCells[plmTaskNameIndex] = buildPlmTaskName({
+      taskName: metadata.taskName,
+      contract: metadata.contract,
+      software: metadata.software,
+      startDate: metadata.startDate,
+      taskType: dataCells[taskTypeIndex],
+    });
     dataCells[timeRangeIndex] = buildTaskTimeRange(metadata.startDate, metadata.endDate);
     lines[dataRowIndex] = formatTableRow(dataCells);
   }
@@ -1454,6 +1559,14 @@ function isTaskTableSeparator(line) {
     return false;
   }
   return /^\|\s*[-: ]+(?:\|\s*[-: ]+)+\|\s*$/.test(line.trim());
+}
+
+function encodeProjectPath(projectPath) {
+  return String(projectPath)
+    .replace(/^\/+|\/+$/g, "")
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("%2F");
 }
 
 function parseGitLabProjectUrl(projectUrl, encodeProjectPathFn) {

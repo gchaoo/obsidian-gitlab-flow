@@ -29,3 +29,9 @@ test("software mapping rows do not render per-row labels", () => {
 
   assert.equal(source.includes(".setName(`映射 ${index + 1}`)"), false);
 });
+
+test("runtime defines a top-level project path encoder for software mapping parsing", () => {
+  const source = fs.readFileSync(MAIN_JS_PATH, "utf8");
+
+  assert.equal(source.includes("function encodeProjectPath("), true);
+});
