@@ -64,6 +64,81 @@ function formatIssueTitleFromArticleName(metadata) {
   return segments.join("");
 }
 
+function encodeProjectPath(projectPath) {
+  return String(projectPath)
+    .replace(/^\/+|\/+$/g, "")
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("%2F");
+}
+
+function parseGitLabProjectUrl(projectUrl) {
+  const text = String(projectUrl || "").trim();
+  let url;
+  try {
+    url = new URL(text);
+  } catch (_) {
+    throw new Error(`软件项目地址需填写完整 GitLab 项目地址：${text}`);
+  }
+
+  const projectPath = url.pathname.replace(/^\/+|\/+$/g, "");
+  if (!/^https?:$/.test(url.protocol) || !projectPath || projectPath.includes("/-/") || projectPath.split("/").length < 2) {
+    throw new Error(`GitLab 项目地址格式不正确：${text}`);
+  }
+
+  return {
+    baseUrl: url.origin,
+    projectPath,
+    project: encodeProjectPath(projectPath),
+  };
+}
+
+function normalizeSoftwareProjectMappingsSetting(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => ({
+        softwareName: String(item?.softwareName || "").trim(),
+        projectUrl: String(item?.projectUrl || "").trim(),
+      }))
+      .filter((item) => item.softwareName || item.projectUrl);
+  }
+
+  return String(value || "")
+    .split(/\r?\n/)
+    .map((rawLine) => String(rawLine || "").trim())
+    .filter(Boolean)
+    .map((line) => {
+      const separatorIndex = line.indexOf("=");
+      if (separatorIndex <= 0) {
+        throw new Error(`软件项目映射格式不正确：${line}`);
+      }
+
+      return {
+        softwareName: line.slice(0, separatorIndex).trim(),
+        projectUrl: line.slice(separatorIndex + 1).trim(),
+      };
+    })
+    .filter((item) => item.softwareName || item.projectUrl);
+}
+
+function parseSoftwareProjectMappings(value) {
+  const mappings = {};
+  const items = normalizeSoftwareProjectMappingsSetting(value);
+
+  for (const item of items) {
+    const softwareName = String(item?.softwareName || "").trim();
+    const projectUrl = String(item?.projectUrl || "").trim();
+    if (!softwareName || !projectUrl) {
+      throw new Error(`软件项目映射格式不正确：${softwareName || projectUrl || JSON.stringify(item)}`);
+    }
+
+    const normalizedTarget = parseGitLabProjectUrl(projectUrl);
+    mappings[softwareName] = `${normalizedTarget.baseUrl}/${normalizedTarget.projectPath}`;
+  }
+
+  return mappings;
+}
+
 function buildTaskTimeRange(startDate, endDate) {
   return `${startDate.raw}～${endDate.raw}`;
 }
@@ -186,6 +261,9 @@ module.exports = {
   buildPrefixedArticleName,
   stripArticleDatePrefix,
   formatIssueTitleFromArticleName,
+  normalizeSoftwareProjectMappingsSetting,
+  parseSoftwareProjectMappings,
+  parseGitLabProjectUrl,
   buildTaskTimeRange,
   extractAssigneeNamesFromLastTaskScheduleTable,
   updateLastTaskScheduleTable,

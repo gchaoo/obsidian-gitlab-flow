@@ -7,6 +7,9 @@ const {
   buildPrefixedArticleName,
   stripArticleDatePrefix,
   formatIssueTitleFromArticleName,
+  normalizeSoftwareProjectMappingsSetting,
+  parseSoftwareProjectMappings,
+  parseGitLabProjectUrl,
   buildTaskTimeRange,
   extractAssigneeNamesFromLastTaskScheduleTable,
   updateLastTaskScheduleTable,
@@ -61,6 +64,58 @@ test("formatIssueTitleFromArticleName uses normalized article name instead of fr
       startDate,
     }),
     "【系统B】收益管理任务_20260324",
+  );
+});
+
+test("parseSoftwareProjectMappings parses multiple software mappings and keeps the last duplicate", () => {
+  const mappings = parseSoftwareProjectMappings([
+    { softwareName: " 系统A ", projectUrl: " https://git.sansi.net:6101/group/a " },
+    { softwareName: "系统B", projectUrl: "https://git.sansi.net:6101/group/b" },
+    { softwareName: "系统A", projectUrl: "https://git.sansi.net:6101/group/a-new" },
+  ]);
+
+  assert.deepEqual(mappings, {
+    系统A: "https://git.sansi.net:6101/group/a-new",
+    系统B: "https://git.sansi.net:6101/group/b",
+  });
+});
+
+test("normalizeSoftwareProjectMappingsSetting migrates legacy multiline text into editable rows", () => {
+  assert.deepEqual(
+    normalizeSoftwareProjectMappingsSetting([
+      " 系统A = https://git.sansi.net:6101/group/a ",
+      "",
+      "系统B=https://git.sansi.net:6101/group/b",
+    ].join("\n")),
+    [
+      { softwareName: "系统A", projectUrl: "https://git.sansi.net:6101/group/a" },
+      { softwareName: "系统B", projectUrl: "https://git.sansi.net:6101/group/b" },
+    ],
+  );
+});
+
+test("parseSoftwareProjectMappings rejects malformed project url values", () => {
+  assert.throws(
+    () => parseSoftwareProjectMappings([{ softwareName: "系统A", projectUrl: "group/project" }]),
+    /完整 GitLab 项目地址/,
+  );
+});
+
+test("parseGitLabProjectUrl extracts base url and project path from a project url", () => {
+  assert.deepEqual(
+    parseGitLabProjectUrl("https://git.sansi.net:6101/led-display-platform/CCS/ccs-web-2/cyberhub-docs"),
+    {
+      baseUrl: "https://git.sansi.net:6101",
+      projectPath: "led-display-platform/CCS/ccs-web-2/cyberhub-docs",
+      project: "led-display-platform%2FCCS%2Fccs-web-2%2Fcyberhub-docs",
+    },
+  );
+});
+
+test("parseGitLabProjectUrl rejects issue urls", () => {
+  assert.throws(
+    () => parseGitLabProjectUrl("https://git.sansi.net:6101/group/project/-/issues/123"),
+    /项目地址格式不正确/,
   );
 });
 

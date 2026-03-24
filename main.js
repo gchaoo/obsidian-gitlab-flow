@@ -7,8 +7,7 @@ const LOG_PREFIX = "obsidian-gitlab-flow";
 const DEFAULT_SETTINGS = {
   tokenEnvVarName: "GITLAB_PERSONAL_ACCESS_TOKEN",
   frontmatterKeys: "相关链接",
-  publishBaseUrl: "https://git.sansi.net:6101",
-  publishProjectPath: "led-display-platform/CCS/ccs-web-2/cyberhub-docs",
+  softwareProjectMappings: [],
   onlineRecordFrontmatterKey: "实时记录",
 };
 
@@ -25,6 +24,7 @@ const REQUIRED_PUBLISH_TAG = "PLM任务";
 module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
   async onload() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    this.settings.softwareProjectMappings = normalizeSoftwareProjectMappingsSetting(this.settings.softwareProjectMappings);
 
     this.addCommand({
       id: "upload-current-file-to-gitlab-note",
@@ -200,10 +200,9 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
 
     const updatedMarkdown = this.applyTaskTableToMarkdown(rawMarkdown, metadata);
     const bodyMarkdown = this.extractMarkdownBody(updatedMarkdown);
-    const target = this.getPublishTarget();
     const issueTitle = this.formatIssueTitle(metadata);
     const existingTarget = metadata.relatedLink ? this.parseIssueTarget(metadata.relatedLink) : null;
-    const issueTarget = existingTarget || target;
+    const issueTarget = existingTarget || this.resolvePublishTargetFromSoftware(metadata);
     const assigneeNames = extractAssigneeNamesFromLastTaskScheduleTable(bodyMarkdown);
     const assigneeIds = await Promise.all(
       assigneeNames.map((executor) => this.resolveAssigneeId(issueTarget, token, executor)),
@@ -219,7 +218,7 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
           assigneeIds,
           labels,
         })
-      : await this.createIssue(target, token, issueTitle, renderedBody, {
+      : await this.createIssue(issueTarget, token, issueTitle, renderedBody, {
           assigneeIds,
           labels,
         });
@@ -481,22 +480,18 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
     };
   }
 
-  getPublishTarget() {
-    const baseUrl = (this.settings.publishBaseUrl || "").trim().replace(/\/+$/g, "");
-    const projectPath = (this.settings.publishProjectPath || "").trim().replace(/^\/+|\/+$/g, "");
-
-    if (!baseUrl) {
-      throw new Error("请在插件设置中填写发布 GitLab 地址。");
-    }
-    if (!projectPath) {
-      throw new Error("请在插件设置中填写发布目标项目路径。");
+  resolvePublishTargetFromSoftware(metadata) {
+    if (!metadata.software) {
+      throw new Error("相关链接为空时，缺少 frontmatter 字段：相关软件");
     }
 
-    return {
-      baseUrl,
-      projectPath,
-      project: this.encodeProjectPath(projectPath),
-    };
+    const mappings = parseSoftwareProjectMappings(this.settings.softwareProjectMappings);
+    const projectUrl = mappings[metadata.software];
+    if (!projectUrl) {
+      throw new Error(`未找到相关软件“${metadata.software}”对应的 GitLab 项目地址，请先在插件设置中配置。`);
+    }
+
+    return parseGitLabProjectUrl(projectUrl, this.encodeProjectPath.bind(this));
   }
 
   encodeProjectPath(projectPath) {
@@ -1006,19 +1001,6 @@ class ObsidianGitlabFlowSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     new Setting(containerEl)
-      .setName("发布 GitLab 地址")
-      .setDesc("任务发布和会议纪要同步使用的 GitLab 站点地址。")
-      .addText((text) =>
-        text
-          .setPlaceholder(DEFAULT_SETTINGS.publishBaseUrl)
-          .setValue(this.plugin.settings.publishBaseUrl)
-          .onChange(async (value) => {
-            this.plugin.settings.publishBaseUrl = value.trim() || DEFAULT_SETTINGS.publishBaseUrl;
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    new Setting(containerEl)
       .setName("Token 环境变量名")
       .setDesc("默认读取 GITLAB_PERSONAL_ACCESS_TOKEN。会依次尝试 process.env、launchctl getenv、zsh -ic。")
       .addText((text) =>
@@ -1032,17 +1014,62 @@ class ObsidianGitlabFlowSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("发布目标项目名")
-      .setDesc("“发布任务到 GitLab”创建 issue 的项目路径，例如 group/project。")
-      .addText((text) =>
-        text
-          .setPlaceholder(DEFAULT_SETTINGS.publishProjectPath)
-          .setValue(this.plugin.settings.publishProjectPath)
-          .onChange(async (value) => {
-            this.plugin.settings.publishProjectPath = value.trim() || DEFAULT_SETTINGS.publishProjectPath;
+      .setName("软件项目映射")
+      .setDesc("按键值对维护软件名称与完整 GitLab 项目 URL，可逐行新增、删除和修改。")
+      .addButton((button) =>
+        button
+          .setButtonText("新增一行")
+          .onClick(async () => {
+            this.plugin.settings.softwareProjectMappings.push({ softwareName: "", projectUrl: "" });
             await this.plugin.saveSettings();
+            this.display();
           }),
       );
+
+    const mappings = this.plugin.settings.softwareProjectMappings;
+    if (mappings.length === 0) {
+      mappings.push({ softwareName: "", projectUrl: "" });
+    }
+
+    mappings.forEach((mapping, index) => {
+      const rowEl = containerEl.createDiv({ cls: "setting-item" });
+      rowEl.style.alignItems = "center";
+
+      const controlEl = rowEl.createDiv({ cls: "setting-item-control" });
+      controlEl.style.display = "flex";
+      controlEl.style.alignItems = "center";
+      controlEl.style.justifyContent = "flex-start";
+      controlEl.style.gap = "12px";
+      controlEl.style.width = "100%";
+
+      const nameInput = controlEl.createEl("input", { type: "text" });
+      nameInput.addClass("text-input");
+      nameInput.placeholder = "软件名称";
+      nameInput.value = mapping.softwareName;
+      nameInput.style.width = "220px";
+      nameInput.addEventListener("change", async () => {
+        this.plugin.settings.softwareProjectMappings[index].softwareName = nameInput.value.trim();
+        await this.plugin.saveSettings();
+      });
+
+      const urlInput = controlEl.createEl("input", { type: "text" });
+      urlInput.addClass("text-input");
+      urlInput.placeholder = "https://git.sansi.net:6101/group/project";
+      urlInput.value = mapping.projectUrl;
+      urlInput.style.flex = "1";
+      urlInput.addEventListener("change", async () => {
+        this.plugin.settings.softwareProjectMappings[index].projectUrl = urlInput.value.trim();
+        await this.plugin.saveSettings();
+      });
+
+      const deleteButton = controlEl.createEl("button", { text: "删除" });
+      deleteButton.addClass("mod-warning");
+      deleteButton.addEventListener("click", async () => {
+        this.plugin.settings.softwareProjectMappings.splice(index, 1);
+        await this.plugin.saveSettings();
+        this.display();
+      });
+    });
 
     new Setting(containerEl)
       .setName("评论目标字段名")
@@ -1427,6 +1454,73 @@ function isTaskTableSeparator(line) {
     return false;
   }
   return /^\|\s*[-: ]+(?:\|\s*[-: ]+)+\|\s*$/.test(line.trim());
+}
+
+function parseGitLabProjectUrl(projectUrl, encodeProjectPathFn) {
+  const text = String(projectUrl || "").trim();
+  let url;
+  try {
+    url = new URL(text);
+  } catch (_) {
+    throw new Error(`软件项目地址需填写完整 GitLab 项目地址：${text}`);
+  }
+
+  const projectPath = url.pathname.replace(/^\/+|\/+$/g, "");
+  if (!/^https?:$/.test(url.protocol) || !projectPath || projectPath.includes("/-/") || projectPath.split("/").length < 2) {
+    throw new Error(`GitLab 项目地址格式不正确：${text}`);
+  }
+
+  return {
+    baseUrl: url.origin,
+    projectPath,
+    project: encodeProjectPathFn(projectPath),
+  };
+}
+
+function normalizeSoftwareProjectMappingsSetting(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => ({
+        softwareName: String(item?.softwareName || "").trim(),
+        projectUrl: String(item?.projectUrl || "").trim(),
+      }))
+      .filter((item) => item.softwareName || item.projectUrl);
+  }
+
+  return String(value || "")
+    .split(/\r?\n/)
+    .map((rawLine) => String(rawLine || "").trim())
+    .filter(Boolean)
+    .map((line) => {
+      const separatorIndex = line.indexOf("=");
+      if (separatorIndex <= 0) {
+        throw new Error(`软件项目映射格式不正确：${line}`);
+      }
+
+      return {
+        softwareName: line.slice(0, separatorIndex).trim(),
+        projectUrl: line.slice(separatorIndex + 1).trim(),
+      };
+    })
+    .filter((item) => item.softwareName || item.projectUrl);
+}
+
+function parseSoftwareProjectMappings(value) {
+  const mappings = {};
+  const items = normalizeSoftwareProjectMappingsSetting(value);
+
+  for (const item of items) {
+    const softwareName = String(item?.softwareName || "").trim();
+    const projectUrl = String(item?.projectUrl || "").trim();
+    if (!softwareName || !projectUrl) {
+      throw new Error(`软件项目映射格式不正确：${softwareName || projectUrl || JSON.stringify(item)}`);
+    }
+
+    const normalizedTarget = parseGitLabProjectUrl(projectUrl, encodeProjectPath);
+    mappings[softwareName] = `${normalizedTarget.baseUrl}/${normalizedTarget.projectPath}`;
+  }
+
+  return mappings;
 }
 
 function escapeRegExp(value) {
