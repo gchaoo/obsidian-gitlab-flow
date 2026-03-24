@@ -25,6 +25,45 @@ function resolveTaskName(taskName, fallbackFileBaseName) {
   return String(fallbackFileBaseName || "").trim();
 }
 
+function hasArticleDatePrefix(articleName) {
+  return /^\d{4}-\d{2}-\d{2}\b/.test(String(articleName || "").trim());
+}
+
+function buildPrefixedArticleName(articleName, startDate) {
+  const normalizedArticleName = String(articleName || "").trim();
+  if (!normalizedArticleName) {
+    return "";
+  }
+  if (hasArticleDatePrefix(normalizedArticleName)) {
+    return normalizedArticleName;
+  }
+  return `${startDate.raw} ${normalizedArticleName}`;
+}
+
+function stripArticleDatePrefix(articleName) {
+  return String(articleName || "")
+    .trim()
+    .replace(/^\d{4}-\d{2}-\d{2}\s*/, "")
+    .trim();
+}
+
+function formatIssueTitleFromArticleName(metadata) {
+  const segments = [];
+  const contract = metadata.contract ? `【${metadata.contract}】` : "";
+  const software = metadata.software ? `【${metadata.software}】` : "";
+
+  if (contract) {
+    segments.push(contract);
+  }
+  if (software) {
+    segments.push(software);
+  }
+  segments.push(
+    `${stripArticleDatePrefix(metadata.articleName)}_${metadata.startDate.year}${metadata.startDate.month}${metadata.startDate.day}`,
+  );
+  return segments.join("");
+}
+
 function buildTaskTimeRange(startDate, endDate) {
   return `${startDate.raw}～${endDate.raw}`;
 }
@@ -144,6 +183,9 @@ function isTableSeparator(line) {
 module.exports = {
   hasRequiredPublishTag,
   resolveTaskName,
+  buildPrefixedArticleName,
+  stripArticleDatePrefix,
+  formatIssueTitleFromArticleName,
   buildTaskTimeRange,
   extractAssigneeNamesFromLastTaskScheduleTable,
   updateLastTaskScheduleTable,

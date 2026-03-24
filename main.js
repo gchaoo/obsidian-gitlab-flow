@@ -192,6 +192,7 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
       throw new Error(`当前文档缺少标签：${REQUIRED_PUBLISH_TAG}`);
     }
 
+    file = await this.prepareTaskFileForPublish(file);
     const token = this.getToken();
     const rawMarkdown = await this.app.vault.cachedRead(file);
     const metadata = this.getTaskMetadata(file);
@@ -230,6 +231,9 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
 
     await this.app.vault.modify(file, updatedMarkdown);
     await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+      if (metadata.shouldBackfillTaskName) {
+        frontmatter["任务名称"] = metadata.articleName;
+      }
       frontmatter["相关链接"] = issueUrl;
       frontmatter["状态"] = ["已发布"];
     });
@@ -251,6 +255,25 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
 
     const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
     return hasRequiredPublishTag(frontmatter?.["相关标签"], REQUIRED_PUBLISH_TAG);
+  }
+
+  async prepareTaskFileForPublish(file) {
+    const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+    if (!frontmatter) {
+      throw new Error("未找到 frontmatter。");
+    }
+
+    const startDate = this.readDateParts(frontmatter["开始日期"], "开始日期");
+    const nextBaseName = buildPrefixedArticleName(file.basename, startDate);
+    if (!nextBaseName || nextBaseName === file.basename) {
+      return file;
+    }
+
+    const parentPath = file.parent?.path || "";
+    const nextPath = normalizePath(parentPath ? `${parentPath}/${nextBaseName}.md` : `${nextBaseName}.md`);
+    await this.app.vault.rename(file, nextPath);
+    const renamedFile = this.app.vault.getAbstractFileByPath(nextPath);
+    return renamedFile || file;
   }
 
   async organizeOnlineRecordCurrentFile() {
@@ -534,9 +557,14 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
 
     const startDate = this.readDateParts(frontmatter["开始日期"], "开始日期");
     const endDate = this.readDateParts(frontmatter["结束日期"], "结束日期");
+    const taskName = this.readOptionalFrontmatter(frontmatter, "任务名称");
+    const articleName = String(file.basename || "").trim();
 
     return {
-      taskName: resolveTaskName(this.readOptionalFrontmatter(frontmatter, "任务名称"), file.basename),
+      articleName,
+      normalizedArticleName: stripArticleDatePrefix(articleName),
+      taskName: resolveTaskName(taskName, articleName),
+      shouldBackfillTaskName: !taskName,
       executor: this.readOptionalFrontmatter(frontmatter, "执行人"),
       planHours: this.readOptionalFrontmatter(frontmatter, "计划工时", { stripWiki: false }),
       taskType: this.readOptionalFrontmatter(frontmatter, "任务类型"),
@@ -637,7 +665,9 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
     if (software) {
       segments.push(software);
     }
-    segments.push(`${metadata.taskName}_${metadata.startDate.year}${metadata.startDate.month}${metadata.startDate.day}`);
+    segments.push(
+      `${metadata.normalizedArticleName}_${metadata.startDate.year}${metadata.startDate.month}${metadata.startDate.day}`,
+    );
     return segments.join("");
   }
 
@@ -1259,6 +1289,28 @@ function resolveTaskName(taskName, fallbackFileBaseName) {
     return normalizedTaskName;
   }
   return String(fallbackFileBaseName || "").trim();
+}
+
+function hasArticleDatePrefix(articleName) {
+  return /^\d{4}-\d{2}-\d{2}\b/.test(String(articleName || "").trim());
+}
+
+function buildPrefixedArticleName(articleName, startDate) {
+  const normalizedArticleName = String(articleName || "").trim();
+  if (!normalizedArticleName) {
+    return "";
+  }
+  if (hasArticleDatePrefix(normalizedArticleName)) {
+    return normalizedArticleName;
+  }
+  return `${startDate.raw} ${normalizedArticleName}`;
+}
+
+function stripArticleDatePrefix(articleName) {
+  return String(articleName || "")
+    .trim()
+    .replace(/^\d{4}-\d{2}-\d{2}\s*/, "")
+    .trim();
 }
 
 function buildTaskTimeRange(startDate, endDate) {

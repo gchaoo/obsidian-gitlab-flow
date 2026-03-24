@@ -4,6 +4,9 @@ const assert = require("node:assert/strict");
 const {
   hasRequiredPublishTag,
   resolveTaskName,
+  buildPrefixedArticleName,
+  stripArticleDatePrefix,
+  formatIssueTitleFromArticleName,
   buildTaskTimeRange,
   extractAssigneeNamesFromLastTaskScheduleTable,
   updateLastTaskScheduleTable,
@@ -22,6 +25,43 @@ test("resolveTaskName falls back to file basename when task name is empty", () =
   assert.equal(resolveTaskName("收益测算", "任务登记 issue"), "收益测算");
   assert.equal(resolveTaskName("", "任务登记 issue"), "任务登记 issue");
   assert.equal(resolveTaskName("   ", "任务登记 issue"), "任务登记 issue");
+});
+
+test("buildPrefixedArticleName adds start date prefix only when article name does not already start with yyyy-mm-dd", () => {
+  const startDate = { raw: "2026-03-24", year: "2026", month: "03", day: "24" };
+
+  assert.equal(buildPrefixedArticleName("收益管理任务", startDate), "2026-03-24 收益管理任务");
+  assert.equal(buildPrefixedArticleName("2026-03-20 收益管理任务", startDate), "2026-03-20 收益管理任务");
+});
+
+test("stripArticleDatePrefix removes a leading yyyy-mm-dd prefix before issue title generation", () => {
+  assert.equal(stripArticleDatePrefix("2026-03-24 收益管理任务"), "收益管理任务");
+  assert.equal(stripArticleDatePrefix("2026-03-24收益管理任务"), "收益管理任务");
+  assert.equal(stripArticleDatePrefix("收益管理任务"), "收益管理任务");
+});
+
+test("formatIssueTitleFromArticleName uses normalized article name instead of frontmatter task name", () => {
+  const startDate = { raw: "2026-03-24", year: "2026", month: "03", day: "24" };
+
+  assert.equal(
+    formatIssueTitleFromArticleName({
+      contract: "合同A",
+      software: "系统B",
+      articleName: "2026-03-24 收益管理任务",
+      startDate,
+    }),
+    "【合同A】【系统B】收益管理任务_20260324",
+  );
+
+  assert.equal(
+    formatIssueTitleFromArticleName({
+      contract: "",
+      software: "系统B",
+      articleName: "2026-03-24 收益管理任务",
+      startDate,
+    }),
+    "【系统B】收益管理任务_20260324",
+  );
 });
 
 test("buildTaskTimeRange uses the new formatting", () => {
