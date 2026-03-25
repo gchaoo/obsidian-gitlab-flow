@@ -143,6 +143,21 @@ function buildTaskTimeRange(startDate, endDate) {
   return `${startDate.raw}～${endDate.raw}`;
 }
 
+function buildExecutorFrontmatterValue(assigneeNames) {
+  const values = [];
+  for (const assigneeName of Array.isArray(assigneeNames) ? assigneeNames : []) {
+    const normalizedName = normalizeTagValue(assigneeName);
+    if (!normalizedName) {
+      continue;
+    }
+    const wikiLink = `[[${normalizedName}]]`;
+    if (!values.includes(wikiLink)) {
+      values.push(wikiLink);
+    }
+  }
+  return values;
+}
+
 function buildWorkItemId(issue) {
   const issueId = Number(issue?.id);
   if (!Number.isInteger(issueId) || issueId <= 0) {
@@ -331,6 +346,7 @@ module.exports = {
   parseGitLabProjectUrl,
   buildPlmTaskName,
   buildTaskTimeRange,
+  buildExecutorFrontmatterValue,
   buildWorkItemId,
   buildWorkItemDateSyncPayload,
   extractAssigneeNamesFromLastTaskScheduleTable,

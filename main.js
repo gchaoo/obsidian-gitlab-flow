@@ -234,6 +234,7 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
       if (metadata.shouldBackfillTaskName) {
         frontmatter["任务名称"] = metadata.articleName;
       }
+      frontmatter["执行人"] = buildExecutorFrontmatterValue(assigneeNames);
       frontmatter["相关链接"] = issueUrl;
       frontmatter["状态"] = ["已发布"];
     });
@@ -1382,6 +1383,21 @@ function stripArticleDatePrefix(articleName) {
 
 function buildTaskTimeRange(startDate, endDate) {
   return `${startDate.raw}～${endDate.raw}`;
+}
+
+function buildExecutorFrontmatterValue(assigneeNames) {
+  const values = [];
+  for (const assigneeName of Array.isArray(assigneeNames) ? assigneeNames : []) {
+    const normalizedName = normalizeTagValue(assigneeName);
+    if (!normalizedName) {
+      continue;
+    }
+    const wikiLink = `[[${normalizedName}]]`;
+    if (!values.includes(wikiLink)) {
+      values.push(wikiLink);
+    }
+  }
+  return values;
 }
 
 function buildWorkItemId(issue) {

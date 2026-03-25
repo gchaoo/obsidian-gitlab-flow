@@ -12,6 +12,7 @@ const {
   parseGitLabProjectUrl,
   buildPlmTaskName,
   buildTaskTimeRange,
+  buildExecutorFrontmatterValue,
   buildWorkItemId,
   buildWorkItemDateSyncPayload,
   extractAssigneeNamesFromLastTaskScheduleTable,
@@ -127,6 +128,14 @@ test("buildTaskTimeRange uses the new formatting", () => {
   const endDate = { raw: "2026-03-25", year: "2026", month: "03", day: "25" };
 
   assert.equal(buildTaskTimeRange(startDate, endDate), "2026-03-20～2026-03-25");
+});
+
+test("buildExecutorFrontmatterValue rewrites assignees into wiki-link arrays", () => {
+  assert.deepEqual(
+    buildExecutorFrontmatterValue(["张三", "李四", "张三", " [[王五]] ", ""]),
+    ["[[张三]]", "[[李四]]", "[[王五]]"],
+  );
+  assert.deepEqual(buildExecutorFrontmatterValue([]), []);
 });
 
 test("buildWorkItemId converts issue id into GitLab WorkItem gid", () => {
