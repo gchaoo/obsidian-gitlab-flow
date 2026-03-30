@@ -8,7 +8,6 @@ const DEFAULT_SETTINGS = {
   tokenEnvVarName: "GITLAB_PERSONAL_ACCESS_TOKEN",
   frontmatterKeys: "相关链接",
   softwareProjectMappings: [],
-  onlineRecordFrontmatterKey: "实时记录",
 };
 
 const FILE_MENU_SECTION = "00-obsidian-gitlab-flow";
@@ -243,10 +242,7 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
   }
 
   getIgnoredMeetingFrontmatterKeys() {
-    return [...new Set([
-      ...IGNORED_MEETING_FRONTMATTER_KEYS,
-      String(this.settings.onlineRecordFrontmatterKey || "").trim(),
-    ].filter(Boolean))];
+    return [...new Set(IGNORED_MEETING_FRONTMATTER_KEYS.filter(Boolean))];
   }
 
   canPublishTaskFile(file) {
@@ -291,9 +287,9 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
       throw new Error("只支持 Markdown 文档。");
     }
 
-    const url = this.findOnlineRecordUrl(file);
+    const url = await this.findOnlineRecordUrl(file);
     if (!url) {
-      throw new Error(`缺少 frontmatter 字段：${this.settings.onlineRecordFrontmatterKey}`);
+      throw new Error("正文 ## 千问记录 下未找到可用链接。");
     }
     if (!isSupportedOnlineRecordUrl(url)) {
       throw new Error("暂不支持该线上记录链接。");
@@ -378,10 +374,9 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
     return "";
   }
 
-  findOnlineRecordUrl(file) {
-    const cache = this.app.metadataCache.getFileCache(file);
-    const key = String(this.settings.onlineRecordFrontmatterKey || DEFAULT_SETTINGS.onlineRecordFrontmatterKey).trim();
-    return getOnlineRecordUrl(cache, key);
+  async findOnlineRecordUrl(file) {
+    const markdown = await this.app.vault.cachedRead(file);
+    return getOnlineRecordUrl(markdown);
   }
 
   async loadRenderedTranscript(url) {
@@ -769,11 +764,13 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
     const markdownMatches = Array.from(markdown.matchAll(MARKDOWN_IMAGE_RE));
     for (const match of markdownMatches) {
       const fullMatch = match[0];
+      const altText = (match[1] || "").trim();
       const imagePath = (match[2] || "").trim();
       if (!imagePath || /^(https?:)?\/\//.test(imagePath)) {
         continue;
       }
-      const uploadMarkdown = await this.uploadMarkdownImage(file, imagePath, target, token);
+      const uploadData = await this.uploadMarkdownImage(file, imagePath, target, token);
+      const uploadMarkdown = formatUploadedImageMarkdown(uploadData, parseMarkdownImageWidth(altText));
       output = output.replace(fullMatch, uploadMarkdown);
     }
 
@@ -781,8 +778,9 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
     for (const match of wikiMatches) {
       const fullMatch = match[0];
       const rawTarget = (match[1] || "").trim();
-      const linkTarget = rawTarget.split("|")[0].trim();
-      const uploadMarkdown = await this.uploadWikiImage(file, linkTarget, target, token);
+      const { linkTarget, width } = parseWikiImageTarget(rawTarget);
+      const uploadData = await this.uploadWikiImage(file, linkTarget, target, token);
+      const uploadMarkdown = formatUploadedImageMarkdown(uploadData, width);
       output = output.replace(fullMatch, uploadMarkdown);
     }
 
@@ -825,11 +823,8 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
     }
 
     const data = await response.json();
-    if (data.markdown) {
-      return data.markdown;
-    }
-    if (data.url) {
-      return `![${fileName}](${data.url})`;
+    if (data.markdown || data.url) {
+      return data;
     }
     throw new Error(`图片上传返回异常：${JSON.stringify(data)}`);
   }
@@ -1125,19 +1120,6 @@ class ObsidianGitlabFlowSettingTab extends PluginSettingTab {
           }),
       );
 
-    new Setting(containerEl)
-      .setName("线上记录字段名")
-      .setDesc("“整理线上记录”读取的 frontmatter 字段名。默认读取 实时记录。")
-      .addText((text) =>
-        text
-          .setPlaceholder(DEFAULT_SETTINGS.onlineRecordFrontmatterKey)
-          .setValue(this.plugin.settings.onlineRecordFrontmatterKey)
-          .onChange(async (value) => {
-            this.plugin.settings.onlineRecordFrontmatterKey =
-              value.trim() || DEFAULT_SETTINGS.onlineRecordFrontmatterKey;
-            await this.plugin.saveSettings();
-          }),
-      );
   }
 }
 
@@ -1145,16 +1127,17 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function getOnlineRecordUrl(cache, frontmatterKey) {
-  const key = typeof frontmatterKey === "string" ? frontmatterKey.trim() : "";
-  const value = key ? cache?.frontmatter?.[key] : null;
-  if (typeof value === "string") {
-    return value.trim();
+const ONLINE_RECORD_SECTION_HEADING = "千问记录";
+const ONLINE_RECORD_URL_RE = /https?:\/\/[^\s)\]]+/g;
+
+function getOnlineRecordUrl(markdown) {
+  const section = extractHeadingSection(markdown, ONLINE_RECORD_SECTION_HEADING, 2);
+  if (!section) {
+    return "";
   }
-  if (Array.isArray(value)) {
-    return value.find((item) => typeof item === "string" && item.trim())?.trim() || "";
-  }
-  return "";
+
+  const candidates = section.match(ONLINE_RECORD_URL_RE) || [];
+  return candidates.find((url) => isSupportedOnlineRecordUrl(url)) || "";
 }
 
 function isSupportedOnlineRecordUrl(url) {
@@ -1332,6 +1315,36 @@ function normalizeInlineText(value) {
     .trim();
 }
 
+function extractHeadingSection(markdown, heading, level) {
+  const lines = String(markdown || "").replace(/\r\n/g, "\n").split("\n");
+  const normalizedHeading = String(heading || "").trim();
+  const expectedPrefix = `${"#".repeat(level)} `;
+  let startIndex = -1;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].trim();
+    if (line === `${expectedPrefix}${normalizedHeading}`) {
+      startIndex = index + 1;
+      break;
+    }
+  }
+
+  if (startIndex < 0) {
+    return "";
+  }
+
+  const collected = [];
+  for (let index = startIndex; index < lines.length; index += 1) {
+    const trimmed = lines[index].trim();
+    const headingMatch = trimmed.match(/^(#{1,6})\s+(.+?)\s*$/);
+    if (headingMatch && headingMatch[1].length <= level) {
+      break;
+    }
+    collected.push(lines[index]);
+  }
+  return collected.join("\n").trim();
+}
+
 function normalizeTagValue(value) {
   const trimmed = String(value || "").trim();
   const wikiMatch = trimmed.match(/^\[\[([^|\]]+)(?:\|([^\]]+))?\]\]$/);
@@ -1383,6 +1396,47 @@ function stripArticleDatePrefix(articleName) {
 
 function buildTaskTimeRange(startDate, endDate) {
   return `${startDate.raw}～${endDate.raw}`;
+}
+
+function parseImageWidthSpec(value) {
+  const matched = String(value || "").trim().match(/^(\d+)x(\d+)$/);
+  return matched ? matched[1] : "";
+}
+
+function parseMarkdownImageWidth(altText) {
+  const parts = String(altText || "").split("|");
+  return parseImageWidthSpec(parts[parts.length - 1]);
+}
+
+function parseWikiImageTarget(rawTarget) {
+  const segments = String(rawTarget || "").split("|");
+  return {
+    linkTarget: String(segments[0] || "").trim(),
+    width: parseImageWidthSpec(segments[segments.length - 1]),
+  };
+}
+
+function extractUploadedImageUrl(uploadData) {
+  const markdown = String(uploadData?.markdown || "").trim();
+  const markdownMatch = markdown.match(/!\[[^\]]*]\(([^)]+)\)/);
+  if (markdownMatch) {
+    return String(markdownMatch[1] || "").trim();
+  }
+  return String(uploadData?.url || "").trim();
+}
+
+function formatUploadedImageMarkdown(uploadData, width) {
+  const normalizedWidth = String(width || "").trim();
+  const url = extractUploadedImageUrl(uploadData);
+  if (!normalizedWidth) {
+    const markdown = String(uploadData?.markdown || "").trim();
+    return markdown || (url ? `![](<${url}>)` : "");
+  }
+
+  if (!url) {
+    throw new Error("图片上传返回异常：缺少可用图片地址。");
+  }
+  return `![](<${url}>){width=${normalizedWidth}}`;
 }
 
 function buildExecutorFrontmatterValue(assigneeNames) {

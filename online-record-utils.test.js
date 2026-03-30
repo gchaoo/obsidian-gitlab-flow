@@ -10,15 +10,46 @@ const {
 } = require("./online-record-utils");
 
 test("getOnlineRecordUrl reads configured frontmatter key", () => {
-  const cache = {
-    frontmatter: {
-      实时记录: "https://www.qianwen.com/efficiency/U/example",
-    },
-  };
+  const markdown = [
+    "## 会议内容",
+    "",
+    "正文说明",
+    "",
+    "## 千问记录",
+    "",
+    "- https://www.qianwen.com/efficiency/U/example",
+    "",
+    "## 其他信息",
+    "",
+    "https://www.qianwen.com/efficiency/U/ignored",
+  ].join("\n");
 
   assert.equal(
-    getOnlineRecordUrl(cache, "实时记录"),
+    getOnlineRecordUrl(markdown),
     "https://www.qianwen.com/efficiency/U/example",
+  );
+});
+
+test("getOnlineRecordUrl only scans links under the qianwen section", () => {
+  const markdown = [
+    "https://www.qianwen.com/efficiency/U/ignored-before",
+    "",
+    "## 千问记录",
+    "",
+    "[记录链接](https://www.qianwen.com/efficiency/doc/transcripts/example?sl=1)",
+    "",
+    "### 备注",
+    "",
+    "补充说明",
+    "",
+    "## 下一个章节",
+    "",
+    "https://www.qianwen.com/efficiency/U/ignored-after",
+  ].join("\n");
+
+  assert.equal(
+    getOnlineRecordUrl(markdown),
+    "https://www.qianwen.com/efficiency/doc/transcripts/example?sl=1",
   );
 });
 

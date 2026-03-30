@@ -1,17 +1,17 @@
 const NEW_START_MARKER = "<!-- obsidian-gitlab-flow:online-record:start -->";
 const NEW_END_MARKER = "<!-- obsidian-gitlab-flow:online-record:end -->";
 const SUPPORTED_HOST = "www.qianwen.com";
+const ONLINE_RECORD_SECTION_HEADING = "千问记录";
+const ONLINE_RECORD_URL_RE = /https?:\/\/[^\s)\]]+/g;
 
-function getOnlineRecordUrl(cache, frontmatterKey) {
-  const key = typeof frontmatterKey === "string" ? frontmatterKey.trim() : "";
-  const value = key ? cache?.frontmatter?.[key] : null;
-  if (typeof value === "string") {
-    return value.trim();
+function getOnlineRecordUrl(markdown) {
+  const section = extractHeadingSection(markdown, ONLINE_RECORD_SECTION_HEADING, 2);
+  if (!section) {
+    return "";
   }
-  if (Array.isArray(value)) {
-    return value.find((item) => typeof item === "string" && item.trim())?.trim() || "";
-  }
-  return "";
+
+  const candidates = section.match(ONLINE_RECORD_URL_RE) || [];
+  return candidates.find((url) => isSupportedOnlineRecordUrl(url)) || "";
 }
 
 function isSupportedOnlineRecordUrl(url) {
@@ -104,6 +104,36 @@ function replaceMarkedSection(markdown, startMarker, endMarker, replacement) {
 
   const replaced = markdown.replace(pattern, `${replacement}\n`);
   return replaced.replace(/\n{3,}/g, "\n\n");
+}
+
+function extractHeadingSection(markdown, heading, level) {
+  const lines = String(markdown || "").replace(/\r\n/g, "\n").split("\n");
+  const normalizedHeading = String(heading || "").trim();
+  const expectedPrefix = `${"#".repeat(level)} `;
+  let startIndex = -1;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].trim();
+    if (line === `${expectedPrefix}${normalizedHeading}`) {
+      startIndex = index + 1;
+      break;
+    }
+  }
+
+  if (startIndex < 0) {
+    return "";
+  }
+
+  const collected = [];
+  for (let index = startIndex; index < lines.length; index += 1) {
+    const trimmed = lines[index].trim();
+    const headingMatch = trimmed.match(/^(#{1,6})\s+(.+?)\s*$/);
+    if (headingMatch && headingMatch[1].length <= level) {
+      break;
+    }
+    collected.push(lines[index]);
+  }
+  return collected.join("\n").trim();
 }
 
 function normalizeInlineText(value) {

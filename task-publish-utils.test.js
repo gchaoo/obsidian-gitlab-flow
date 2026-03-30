@@ -10,6 +10,10 @@ const {
   normalizeSoftwareProjectMappingsSetting,
   parseSoftwareProjectMappings,
   parseGitLabProjectUrl,
+  parseImageWidthSpec,
+  parseMarkdownImageWidth,
+  parseWikiImageTarget,
+  formatUploadedImageMarkdown,
   buildPlmTaskName,
   buildTaskTimeRange,
   buildExecutorFrontmatterValue,
@@ -128,6 +132,50 @@ test("buildTaskTimeRange uses the new formatting", () => {
   const endDate = { raw: "2026-03-25", year: "2026", month: "03", day: "25" };
 
   assert.equal(buildTaskTimeRange(startDate, endDate), "2026-03-20～2026-03-25");
+});
+
+test("parseImageWidthSpec extracts width only from valid widthxheight text", () => {
+  assert.equal(parseImageWidthSpec("315x267"), "315");
+  assert.equal(parseImageWidthSpec(" 315x267 "), "315");
+  assert.equal(parseImageWidthSpec("315"), "");
+  assert.equal(parseImageWidthSpec("315xabc"), "");
+  assert.equal(parseImageWidthSpec("abcx267"), "");
+});
+
+test("parseMarkdownImageWidth reads size from obsidian markdown alt text", () => {
+  assert.equal(parseMarkdownImageWidth("|315x267"), "315");
+  assert.equal(parseMarkdownImageWidth("说明|315x267"), "315");
+  assert.equal(parseMarkdownImageWidth("说明"), "");
+});
+
+test("parseWikiImageTarget keeps image path and extracts width from size suffix", () => {
+  assert.deepEqual(parseWikiImageTarget("image-1.png|315x267"), {
+    linkTarget: "image-1.png",
+    width: "315",
+  });
+  assert.deepEqual(parseWikiImageTarget("image-1.png"), {
+    linkTarget: "image-1.png",
+    width: "",
+  });
+});
+
+test("formatUploadedImageMarkdown rewrites uploaded markdown into width-aware gitlab markdown", () => {
+  assert.equal(
+    formatUploadedImageMarkdown({ markdown: "![image](/uploads/abc/image-1.png)" }, "315"),
+    "![](</uploads/abc/image-1.png>){width=315}",
+  );
+  assert.equal(
+    formatUploadedImageMarkdown({ markdown: "![image](/uploads/abc/image-1.png)" }, ""),
+    "![image](/uploads/abc/image-1.png)",
+  );
+  assert.equal(
+    formatUploadedImageMarkdown({ url: "/uploads/abc/image-1.png" }, "315"),
+    "![](</uploads/abc/image-1.png>){width=315}",
+  );
+  assert.equal(
+    formatUploadedImageMarkdown({ url: "/uploads/abc/image-1.png" }, ""),
+    "![](</uploads/abc/image-1.png>)",
+  );
 });
 
 test("buildExecutorFrontmatterValue rewrites assignees into wiki-link arrays", () => {

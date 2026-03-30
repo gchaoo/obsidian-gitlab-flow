@@ -9,11 +9,10 @@ test("settings labels appear in the expected order", () => {
   const source = fs.readFileSync(MAIN_JS_PATH, "utf8");
   const names = Array.from(source.matchAll(/\.setName\("([^"]+)"\)/g)).map((match) => match[1]);
 
-  assert.deepEqual(names.slice(0, 4), [
+  assert.deepEqual(names.slice(0, 3), [
     "Token 环境变量名",
     "软件项目映射",
     "评论目标字段名",
-    "线上记录字段名",
   ]);
 });
 

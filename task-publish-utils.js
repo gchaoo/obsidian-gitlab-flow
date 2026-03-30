@@ -143,6 +143,47 @@ function buildTaskTimeRange(startDate, endDate) {
   return `${startDate.raw}～${endDate.raw}`;
 }
 
+function parseImageWidthSpec(value) {
+  const matched = String(value || "").trim().match(/^(\d+)x(\d+)$/);
+  return matched ? matched[1] : "";
+}
+
+function parseMarkdownImageWidth(altText) {
+  const parts = String(altText || "").split("|");
+  return parseImageWidthSpec(parts[parts.length - 1]);
+}
+
+function parseWikiImageTarget(rawTarget) {
+  const segments = String(rawTarget || "").split("|");
+  return {
+    linkTarget: String(segments[0] || "").trim(),
+    width: parseImageWidthSpec(segments[segments.length - 1]),
+  };
+}
+
+function extractUploadedImageUrl(uploadData) {
+  const markdown = String(uploadData?.markdown || "").trim();
+  const markdownMatch = markdown.match(/!\[[^\]]*]\(([^)]+)\)/);
+  if (markdownMatch) {
+    return String(markdownMatch[1] || "").trim();
+  }
+  return String(uploadData?.url || "").trim();
+}
+
+function formatUploadedImageMarkdown(uploadData, width) {
+  const normalizedWidth = String(width || "").trim();
+  const url = extractUploadedImageUrl(uploadData);
+  if (!normalizedWidth) {
+    const markdown = String(uploadData?.markdown || "").trim();
+    return markdown || (url ? `![](<${url}>)` : "");
+  }
+
+  if (!url) {
+    throw new Error("图片上传返回异常：缺少可用图片地址。");
+  }
+  return `![](<${url}>){width=${normalizedWidth}}`;
+}
+
 function buildExecutorFrontmatterValue(assigneeNames) {
   const values = [];
   for (const assigneeName of Array.isArray(assigneeNames) ? assigneeNames : []) {
@@ -344,6 +385,10 @@ module.exports = {
   normalizeSoftwareProjectMappingsSetting,
   parseSoftwareProjectMappings,
   parseGitLabProjectUrl,
+  parseImageWidthSpec,
+  parseMarkdownImageWidth,
+  parseWikiImageTarget,
+  formatUploadedImageMarkdown,
   buildPlmTaskName,
   buildTaskTimeRange,
   buildExecutorFrontmatterValue,
