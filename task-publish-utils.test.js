@@ -3,9 +3,9 @@ const assert = require("node:assert/strict");
 
 const {
   hasRequiredPublishTag,
+  resolveMeetingTopic,
   resolveTaskName,
-  buildPrefixedArticleName,
-  stripArticleDatePrefix,
+  buildPublishedArticleName,
   formatIssueTitleFromArticleName,
   normalizeSoftwareProjectMappingsSetting,
   parseSoftwareProjectMappings,
@@ -23,42 +23,49 @@ const {
   updateLastTaskScheduleTable,
 } = require("./task-publish-utils");
 
-test("hasRequiredPublishTag matches exact PLM tag in array and string values", () => {
+test("hasRequiredPublishTag matches exact required tags in array and string values", () => {
   assert.equal(hasRequiredPublishTag(["普通任务", "PLM任务"], "PLM任务"), true);
   assert.equal(hasRequiredPublishTag("PLM任务", "PLM任务"), true);
   assert.equal(hasRequiredPublishTag(["[[PLM任务]]"], "PLM任务"), true);
   assert.equal(hasRequiredPublishTag(["PLM任务-扩展"], "PLM任务"), false);
   assert.equal(hasRequiredPublishTag(["普通任务"], "PLM任务"), false);
   assert.equal(hasRequiredPublishTag(null, "PLM任务"), false);
+  assert.equal(hasRequiredPublishTag(["会议纪要", "普通文档"], "会议纪要"), true);
+  assert.equal(hasRequiredPublishTag("会议纪要-补充", "会议纪要"), false);
 });
 
 test("resolveTaskName falls back to file basename when task name is empty", () => {
   assert.equal(resolveTaskName("收益测算", "任务登记 issue"), "收益测算");
   assert.equal(resolveTaskName("", "任务登记 issue"), "任务登记 issue");
   assert.equal(resolveTaskName("   ", "任务登记 issue"), "任务登记 issue");
+  assert.equal(resolveTaskName("", "01-任务登记 issue"), "任务登记 issue");
+  assert.equal(resolveTaskName("", "9-任务登记 issue_20260401"), "任务登记 issue_20260401");
 });
 
-test("buildPrefixedArticleName adds start date prefix only when article name does not already start with yyyy-mm-dd", () => {
+test("resolveMeetingTopic falls back to file basename when meeting topic is empty", () => {
+  assert.equal(resolveMeetingTopic("周会纪要", "会议纪要"), "周会纪要");
+  assert.equal(resolveMeetingTopic("", "会议纪要"), "会议纪要");
+  assert.equal(resolveMeetingTopic("   ", "会议纪要"), "会议纪要");
+});
+
+test("buildPublishedArticleName removes legacy date prefixes and appends a yyyymmdd suffix when missing", () => {
   const startDate = { raw: "2026-03-24", year: "2026", month: "03", day: "24" };
 
-  assert.equal(buildPrefixedArticleName("收益管理任务", startDate), "2026-03-24 收益管理任务");
-  assert.equal(buildPrefixedArticleName("2026-03-20 收益管理任务", startDate), "2026-03-20 收益管理任务");
+  assert.equal(buildPublishedArticleName("收益管理任务", startDate), "收益管理任务_20260324");
+  assert.equal(buildPublishedArticleName("2026-03-20 收益管理任务", startDate), "收益管理任务_20260324");
+  assert.equal(buildPublishedArticleName("2026-03-20收益管理任务", startDate), "收益管理任务_20260324");
+  assert.equal(buildPublishedArticleName("收益管理任务_20260324", startDate), "收益管理任务_20260324");
+  assert.equal(buildPublishedArticleName("收益管理任务_20260320", startDate), "收益管理任务_20260320");
 });
 
-test("stripArticleDatePrefix removes a leading yyyy-mm-dd prefix before issue title generation", () => {
-  assert.equal(stripArticleDatePrefix("2026-03-24 收益管理任务"), "收益管理任务");
-  assert.equal(stripArticleDatePrefix("2026-03-24收益管理任务"), "收益管理任务");
-  assert.equal(stripArticleDatePrefix("收益管理任务"), "收益管理任务");
-});
-
-test("formatIssueTitleFromArticleName uses normalized article name instead of frontmatter task name", () => {
+test("formatIssueTitleFromArticleName removes leading numeric-hyphen prefixes without duplicating the date suffix", () => {
   const startDate = { raw: "2026-03-24", year: "2026", month: "03", day: "24" };
 
   assert.equal(
     formatIssueTitleFromArticleName({
       contract: "合同A",
       software: "系统B",
-      articleName: "2026-03-24 收益管理任务",
+      articleName: "01-收益管理任务_20260324",
       startDate,
     }),
     "【合同A】【系统B】收益管理任务_20260324",
@@ -68,7 +75,7 @@ test("formatIssueTitleFromArticleName uses normalized article name instead of fr
     formatIssueTitleFromArticleName({
       contract: "",
       software: "系统B",
-      articleName: "2026-03-24 收益管理任务",
+      articleName: "9-收益管理任务_20260324",
       startDate,
     }),
     "【系统B】收益管理任务_20260324",
@@ -226,7 +233,7 @@ test("buildPlmTaskName uses contract, software, task name, row task type, and st
       startDate,
       taskType: "开发",
     }),
-    "【合同A】【系统B】收益测算_开发_20260320",
+    "【合同A】【系统B】收益测算-开发_20260320",
   );
 
   assert.equal(
@@ -237,7 +244,7 @@ test("buildPlmTaskName uses contract, software, task name, row task type, and st
       startDate,
       taskType: "开发",
     }),
-    "【系统B】收益测算_开发_20260320",
+    "【系统B】收益测算-开发_20260320",
   );
 
   assert.equal(
@@ -248,7 +255,7 @@ test("buildPlmTaskName uses contract, software, task name, row task type, and st
       startDate,
       taskType: "开发",
     }),
-    "【合同A】收益测算_开发_20260320",
+    "【合同A】收益测算-开发_20260320",
   );
 
   assert.equal(
@@ -259,18 +266,18 @@ test("buildPlmTaskName uses contract, software, task name, row task type, and st
       startDate,
       taskType: "开发",
     }),
-    "收益测算_开发_20260320",
+    "收益测算-开发_20260320",
   );
 
   assert.equal(
     buildPlmTaskName({
       contract: "",
       software: "排班管理",
-      taskName: "2026-03-24 基础框架",
+      taskName: "基础框架_20260324",
       startDate,
       taskType: "2D设计",
     }),
-    "【排班管理】基础框架_2D设计_20260320",
+    "【排班管理】基础框架-2D设计_20260320",
   );
 });
 
@@ -302,11 +309,11 @@ test("updateLastTaskScheduleTable keeps PLM task name column and updates plm tas
 
   assert.match(updated, /\| 旧任务 \| 张三 \| 2h \| 开发 \| 郭程豪 \| 2026-03-01～2026-03-02 \|/);
   assert.match(lastSection, /\| PLM任务名称 \| 执行人 \| 计划工时 \| 任务类型 \| 确认人 \| 时间范围 \|/);
-  assert.match(lastSection, /\| 【合同A】【系统B】收益测算_开发_20260320 \| 李四 \| 2h \| 开发 \| 郭程豪 \| 2026-03-20～2026-03-25 \|/);
-  assert.match(lastSection, /\| 【合同A】【系统B】收益测算_测试_20260320 \| 王五 \| 3h \| 测试 \| 郭程豪 \| 2026-03-20～2026-03-25 \|/);
+  assert.match(lastSection, /\| 【合同A】【系统B】收益测算-开发_20260320 \| 李四 \| 2h \| 开发 \| 郭程豪 \| 2026-03-20～2026-03-25 \|/);
+  assert.match(lastSection, /\| 【合同A】【系统B】收益测算-测试_20260320 \| 王五 \| 3h \| 测试 \| 郭程豪 \| 2026-03-20～2026-03-25 \|/);
 });
 
-test("updateLastTaskScheduleTable throws when task schedule table lacks PLM task name column", () => {
+test("updateLastTaskScheduleTable prepends PLM task name column when task schedule table lacks it", () => {
   const original = [
     "## 任务安排",
     "",
@@ -316,16 +323,17 @@ test("updateLastTaskScheduleTable throws when task schedule table lacks PLM task
     "",
   ].join("\n");
 
-  assert.throws(
-    () => updateLastTaskScheduleTable(original, {
-      taskName: "收益测算",
-      contract: "合同A",
-      software: "系统B",
-      startDate: { raw: "2026-03-20", year: "2026", month: "03", day: "20" },
-      endDate: { raw: "2026-03-25", year: "2026", month: "03", day: "25" },
-    }),
-    /缺少 PLM任务名称 列/,
-  );
+  const updated = updateLastTaskScheduleTable(original, {
+    taskName: "收益测算",
+    contract: "合同A",
+    software: "系统B",
+    startDate: { raw: "2026-03-20", year: "2026", month: "03", day: "20" },
+    endDate: { raw: "2026-03-25", year: "2026", month: "03", day: "25" },
+  });
+
+  assert.match(updated, /\| PLM任务名称 \| 执行人 \| 计划工时 \| 任务类型 \| 确认人 \| 时间范围 \|/);
+  assert.match(updated, /\| --- \| --- \| --- \| --- \| --- \| --- \|/);
+  assert.match(updated, /\| 【合同A】【系统B】收益测算-开发_20260320 \| 李四 \| 2h \| 开发 \| 郭程豪 \| 2026-03-20～2026-03-25 \|/);
 });
 
 test("updateLastTaskScheduleTable throws when any row lacks task type", () => {

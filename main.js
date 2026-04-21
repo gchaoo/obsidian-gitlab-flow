@@ -18,6 +18,7 @@ const IGNORED_MEETING_FRONTMATTER_KEYS = ["实时记录"];
 const TASK_LINK_KEYS = ["相关链接", "相关连接"];
 const ONLINE_RECORD_READY_TEXTS = ["全文概要", "章节速览", "语音转文字"];
 const ONLINE_RECORD_LOAD_TIMEOUT_MS = 60000;
+const REQUIRED_MEETING_TAG = "会议纪要";
 const REQUIRED_PUBLISH_TAG = "PLM任务";
 
 module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
@@ -30,7 +31,7 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
       name: "同步会议纪要到 GitLab",
       checkCallback: (checking) => {
         const file = this.app.workspace.getActiveFile();
-        if (!file || file.extension !== "md") {
+        if (!this.canUploadMeetingFile(file)) {
           return false;
         }
         if (!checking) {
@@ -141,8 +142,8 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
 
   async uploadCurrentFile() {
     const file = this.app.workspace.getActiveFile();
-    if (!file || file.extension !== "md") {
-      throw new Error("请先打开一个 Markdown 文档。");
+    if (!this.canUploadMeetingFile(file)) {
+      throw new Error(`当前文档缺少标签：${REQUIRED_MEETING_TAG}`);
     }
 
     await this.uploadFile(file);
@@ -151,6 +152,9 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
   async uploadFile(file) {
     if (!file || file.extension !== "md") {
       throw new Error("只支持 Markdown 文档。");
+    }
+    if (!this.canUploadMeetingFile(file)) {
+      throw new Error(`当前文档缺少标签：${REQUIRED_MEETING_TAG}`);
     }
 
     const token = this.getToken();
@@ -164,6 +168,7 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
     if (!target.noteId) {
       throw new Error("相关链接需填写评论url");
     }
+    await this.backfillMeetingTopic(file);
     const cleanedMarkdown = this.removeFrontmatterKeysFromMarkdown(
       markdown,
       this.getIgnoredMeetingFrontmatterKeys(),
@@ -231,7 +236,7 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
     await this.app.vault.modify(file, updatedMarkdown);
     await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
       if (metadata.shouldBackfillTaskName) {
-        frontmatter["任务名称"] = metadata.articleName;
+        frontmatter["任务名称"] = metadata.taskName;
       }
       frontmatter["执行人"] = buildExecutorFrontmatterValue(assigneeNames);
       frontmatter["相关链接"] = issueUrl;
@@ -243,6 +248,34 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
 
   getIgnoredMeetingFrontmatterKeys() {
     return [...new Set(IGNORED_MEETING_FRONTMATTER_KEYS.filter(Boolean))];
+  }
+
+  async backfillMeetingTopic(file) {
+    const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+    if (!frontmatter) {
+      return;
+    }
+
+    const meetingTopic = this.readOptionalFrontmatter(frontmatter, "会议主题", { stripWiki: false });
+    const nextMeetingTopic = resolveMeetingTopic(meetingTopic, file.basename);
+    if (!nextMeetingTopic || nextMeetingTopic === meetingTopic) {
+      return;
+    }
+
+    await this.app.fileManager.processFrontMatter(file, (currentFrontmatter) => {
+      if (!String(currentFrontmatter?.["会议主题"] || "").trim()) {
+        currentFrontmatter["会议主题"] = nextMeetingTopic;
+      }
+    });
+  }
+
+  canUploadMeetingFile(file) {
+    if (!file || file.extension !== "md") {
+      return false;
+    }
+
+    const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+    return hasRequiredPublishTag(frontmatter?.["相关标签"], REQUIRED_MEETING_TAG);
   }
 
   canPublishTaskFile(file) {
@@ -261,7 +294,7 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
     }
 
     const startDate = this.readDateParts(frontmatter["开始日期"], "开始日期");
-    const nextBaseName = buildPrefixedArticleName(file.basename, startDate);
+    const nextBaseName = buildPublishedArticleName(file.basename, startDate);
     if (!nextBaseName || nextBaseName === file.basename) {
       return file;
     }
@@ -550,7 +583,7 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
 
     return {
       articleName,
-      normalizedArticleName: stripArticleDatePrefix(articleName),
+      normalizedArticleName: removeNumericHyphenPrefix(articleName),
       taskName: resolveTaskName(taskName, articleName),
       shouldBackfillTaskName: !taskName,
       executor: this.readOptionalFrontmatter(frontmatter, "执行人"),
@@ -653,9 +686,7 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
     if (software) {
       segments.push(software);
     }
-    segments.push(
-      `${metadata.normalizedArticleName}_${metadata.startDate.year}${metadata.startDate.month}${metadata.startDate.day}`,
-    );
+    segments.push(metadata.normalizedArticleName);
     return segments.join("");
   }
 
@@ -1369,29 +1400,46 @@ function resolveTaskName(taskName, fallbackFileBaseName) {
   if (normalizedTaskName) {
     return normalizedTaskName;
   }
+  return removeNumericHyphenPrefix(fallbackFileBaseName);
+}
+
+function resolveMeetingTopic(meetingTopic, fallbackFileBaseName) {
+  const normalizedMeetingTopic = String(meetingTopic || "").trim();
+  if (normalizedMeetingTopic) {
+    return normalizedMeetingTopic;
+  }
   return String(fallbackFileBaseName || "").trim();
 }
 
-function hasArticleDatePrefix(articleName) {
-  return /^\d{4}-\d{2}-\d{2}\b/.test(String(articleName || "").trim());
+function removeNumericHyphenPrefix(value) {
+  return String(value || "").trim().replace(/^\d+-/, "").trim();
 }
 
-function buildPrefixedArticleName(articleName, startDate) {
+function removeTrailingDateSuffix(value) {
+  return String(value || "").trim().replace(/_\d{8}$/, "").trim();
+}
+
+function removeLegacyArticleDatePrefix(articleName) {
   const normalizedArticleName = String(articleName || "").trim();
   if (!normalizedArticleName) {
     return "";
   }
-  if (hasArticleDatePrefix(normalizedArticleName)) {
-    return normalizedArticleName;
-  }
-  return `${startDate.raw} ${normalizedArticleName}`;
+  return normalizedArticleName.replace(/^\d{4}-\d{2}-\d{2}\s*/, "").trim();
 }
 
-function stripArticleDatePrefix(articleName) {
-  return String(articleName || "")
-    .trim()
-    .replace(/^\d{4}-\d{2}-\d{2}\s*/, "")
-    .trim();
+function hasArticleDateSuffix(articleName) {
+  return /_\d{8}$/.test(String(articleName || "").trim());
+}
+
+function buildPublishedArticleName(articleName, startDate) {
+  const normalizedArticleName = removeLegacyArticleDatePrefix(articleName);
+  if (!normalizedArticleName) {
+    return "";
+  }
+  if (hasArticleDateSuffix(normalizedArticleName)) {
+    return normalizedArticleName;
+  }
+  return `${normalizedArticleName}_${startDate.year}${startDate.month}${startDate.day}`;
 }
 
 function buildTaskTimeRange(startDate, endDate) {
@@ -1493,7 +1541,7 @@ function buildPlmTaskName(metadata) {
   const contract = metadata.contract ? `【${metadata.contract}】` : "";
   const software = metadata.software ? `【${metadata.software}】` : "";
   const taskType = String(metadata.taskType || "").trim();
-  const normalizedTaskName = stripArticleDatePrefix(metadata.taskName);
+  const normalizedTaskName = removeTrailingDateSuffix(metadata.taskName);
   if (!taskType) {
     throw new Error("任务安排表格中的 任务类型 为必填项。");
   }
@@ -1504,9 +1552,7 @@ function buildPlmTaskName(metadata) {
   if (software) {
     segments.push(software);
   }
-  segments.push(
-    `${normalizedTaskName}_${taskType}_${metadata.startDate.year}${metadata.startDate.month}${metadata.startDate.day}`,
-  );
+  segments.push(`${normalizedTaskName}-${taskType}_${metadata.startDate.year}${metadata.startDate.month}${metadata.startDate.day}`);
   return segments.join("");
 }
 
@@ -1535,26 +1581,26 @@ function updateLastTaskScheduleTable(body, metadata) {
     throw new Error("任务安排表格缺少数据行。");
   }
 
-  const plmTaskNameIndex = headerCells.indexOf("PLM任务名称");
-  if (plmTaskNameIndex < 0) {
-    throw new Error("任务安排表格缺少 PLM任务名称 列。");
-  }
+  const normalizedTable = ensurePlmTaskNameColumn(headerCells, rows);
+  const normalizedHeaderCells = normalizedTable.headerCells;
+  const normalizedRows = normalizedTable.rows;
+  const plmTaskNameIndex = normalizedTable.plmTaskNameIndex;
 
-  const taskTypeIndex = headerCells.indexOf("任务类型");
+  const taskTypeIndex = normalizedHeaderCells.indexOf("任务类型");
   if (taskTypeIndex < 0) {
     throw new Error("任务安排表格缺少必要列。");
   }
 
-  const timeRangeIndex = headerCells.indexOf("时间范围");
+  const timeRangeIndex = normalizedHeaderCells.indexOf("时间范围");
   if (timeRangeIndex < 0) {
     throw new Error("任务安排表格缺少必要列。");
   }
 
-  lines[headerIndex] = formatTableRow(headerCells);
-  lines[headerIndex + 1] = formatTableSeparator(headerCells.length);
-  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+  lines[headerIndex] = formatTableRow(normalizedHeaderCells);
+  lines[headerIndex + 1] = formatTableSeparator(normalizedHeaderCells.length);
+  for (let rowIndex = 0; rowIndex < normalizedRows.length; rowIndex += 1) {
     const dataRowIndex = headerIndex + 2 + rowIndex;
-    const dataCells = [...rows[rowIndex]];
+    const dataCells = [...normalizedRows[rowIndex]];
     dataCells[plmTaskNameIndex] = buildPlmTaskName({
       taskName: metadata.taskName,
       contract: metadata.contract,
@@ -1567,6 +1613,23 @@ function updateLastTaskScheduleTable(body, metadata) {
   }
 
   return lines.join(newline);
+}
+
+function ensurePlmTaskNameColumn(headerCells, rows) {
+  const plmTaskNameIndex = headerCells.indexOf("PLM任务名称");
+  if (plmTaskNameIndex >= 0) {
+    return {
+      headerCells: [...headerCells],
+      rows: rows.map((row) => [...row]),
+      plmTaskNameIndex,
+    };
+  }
+
+  return {
+    headerCells: ["PLM任务名称", ...headerCells],
+    rows: rows.map((row) => ["", ...row]),
+    plmTaskNameIndex: 0,
+  };
 }
 
 function getLastTaskScheduleTable(body) {

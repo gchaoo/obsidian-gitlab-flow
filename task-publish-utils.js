@@ -22,35 +22,53 @@ function resolveTaskName(taskName, fallbackFileBaseName) {
   if (normalizedTaskName) {
     return normalizedTaskName;
   }
+  return removeNumericHyphenPrefix(fallbackFileBaseName);
+}
+
+function resolveMeetingTopic(meetingTopic, fallbackFileBaseName) {
+  const normalizedMeetingTopic = String(meetingTopic || "").trim();
+  if (normalizedMeetingTopic) {
+    return normalizedMeetingTopic;
+  }
   return String(fallbackFileBaseName || "").trim();
 }
 
-function hasArticleDatePrefix(articleName) {
-  return /^\d{4}-\d{2}-\d{2}\b/.test(String(articleName || "").trim());
+function removeNumericHyphenPrefix(value) {
+  return String(value || "").trim().replace(/^\d+-/, "").trim();
 }
 
-function buildPrefixedArticleName(articleName, startDate) {
+function removeTrailingDateSuffix(value) {
+  return String(value || "").trim().replace(/_\d{8}$/, "").trim();
+}
+
+function removeLegacyArticleDatePrefix(articleName) {
   const normalizedArticleName = String(articleName || "").trim();
   if (!normalizedArticleName) {
     return "";
   }
-  if (hasArticleDatePrefix(normalizedArticleName)) {
-    return normalizedArticleName;
-  }
-  return `${startDate.raw} ${normalizedArticleName}`;
+  return normalizedArticleName.replace(/^\d{4}-\d{2}-\d{2}\s*/, "").trim();
 }
 
-function stripArticleDatePrefix(articleName) {
-  return String(articleName || "")
-    .trim()
-    .replace(/^\d{4}-\d{2}-\d{2}\s*/, "")
-    .trim();
+function hasArticleDateSuffix(articleName) {
+  return /_\d{8}$/.test(String(articleName || "").trim());
+}
+
+function buildPublishedArticleName(articleName, startDate) {
+  const normalizedArticleName = removeLegacyArticleDatePrefix(articleName);
+  if (!normalizedArticleName) {
+    return "";
+  }
+  if (hasArticleDateSuffix(normalizedArticleName)) {
+    return normalizedArticleName;
+  }
+  return `${normalizedArticleName}_${startDate.year}${startDate.month}${startDate.day}`;
 }
 
 function formatIssueTitleFromArticleName(metadata) {
   const segments = [];
   const contract = metadata.contract ? `【${metadata.contract}】` : "";
   const software = metadata.software ? `【${metadata.software}】` : "";
+  const normalizedArticleName = removeNumericHyphenPrefix(metadata.articleName);
 
   if (contract) {
     segments.push(contract);
@@ -58,9 +76,7 @@ function formatIssueTitleFromArticleName(metadata) {
   if (software) {
     segments.push(software);
   }
-  segments.push(
-    `${stripArticleDatePrefix(metadata.articleName)}_${metadata.startDate.year}${metadata.startDate.month}${metadata.startDate.day}`,
-  );
+  segments.push(normalizedArticleName);
   return segments.join("");
 }
 
@@ -238,7 +254,7 @@ function buildPlmTaskName(metadata) {
   const contract = metadata.contract ? `【${metadata.contract}】` : "";
   const software = metadata.software ? `【${metadata.software}】` : "";
   const taskType = String(metadata.taskType || "").trim();
-  const normalizedTaskName = stripArticleDatePrefix(metadata.taskName);
+  const normalizedTaskName = removeTrailingDateSuffix(metadata.taskName);
   if (!taskType) {
     throw new Error("任务安排表格中的 任务类型 为必填项。");
   }
@@ -249,9 +265,7 @@ function buildPlmTaskName(metadata) {
   if (software) {
     segments.push(software);
   }
-  segments.push(
-    `${normalizedTaskName}_${taskType}_${metadata.startDate.year}${metadata.startDate.month}${metadata.startDate.day}`,
-  );
+  segments.push(`${normalizedTaskName}-${taskType}_${metadata.startDate.year}${metadata.startDate.month}${metadata.startDate.day}`);
   return segments.join("");
 }
 
@@ -280,26 +294,26 @@ function updateLastTaskScheduleTable(body, metadata) {
     throw new Error("任务安排表格缺少数据行。");
   }
 
-  const plmTaskNameIndex = headerCells.indexOf("PLM任务名称");
-  if (plmTaskNameIndex < 0) {
-    throw new Error("任务安排表格缺少 PLM任务名称 列。");
-  }
+  const normalizedTable = ensurePlmTaskNameColumn(headerCells, rows);
+  const normalizedHeaderCells = normalizedTable.headerCells;
+  const normalizedRows = normalizedTable.rows;
+  const plmTaskNameIndex = normalizedTable.plmTaskNameIndex;
 
-  const taskTypeIndex = headerCells.indexOf("任务类型");
+  const taskTypeIndex = normalizedHeaderCells.indexOf("任务类型");
   if (taskTypeIndex < 0) {
     throw new Error("任务安排表格缺少必要列。");
   }
 
-  const timeRangeIndex = headerCells.indexOf("时间范围");
+  const timeRangeIndex = normalizedHeaderCells.indexOf("时间范围");
   if (timeRangeIndex < 0) {
     throw new Error("任务安排表格缺少必要列。");
   }
 
-  lines[headerIndex] = formatTableRow(headerCells);
-  lines[headerIndex + 1] = formatTableSeparator(headerCells.length);
-  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+  lines[headerIndex] = formatTableRow(normalizedHeaderCells);
+  lines[headerIndex + 1] = formatTableSeparator(normalizedHeaderCells.length);
+  for (let rowIndex = 0; rowIndex < normalizedRows.length; rowIndex += 1) {
     const dataRowIndex = headerIndex + 2 + rowIndex;
-    const dataCells = [...rows[rowIndex]];
+    const dataCells = [...normalizedRows[rowIndex]];
     dataCells[plmTaskNameIndex] = buildPlmTaskName({
       taskName: metadata.taskName,
       contract: metadata.contract,
@@ -312,6 +326,23 @@ function updateLastTaskScheduleTable(body, metadata) {
   }
 
   return lines.join(newline);
+}
+
+function ensurePlmTaskNameColumn(headerCells, rows) {
+  const plmTaskNameIndex = headerCells.indexOf("PLM任务名称");
+  if (plmTaskNameIndex >= 0) {
+    return {
+      headerCells: [...headerCells],
+      rows: rows.map((row) => [...row]),
+      plmTaskNameIndex,
+    };
+  }
+
+  return {
+    headerCells: ["PLM任务名称", ...headerCells],
+    rows: rows.map((row) => ["", ...row]),
+    plmTaskNameIndex: 0,
+  };
 }
 
 function getLastTaskScheduleTable(body) {
@@ -378,9 +409,9 @@ function isTableSeparator(line) {
 
 module.exports = {
   hasRequiredPublishTag,
+  resolveMeetingTopic,
   resolveTaskName,
-  buildPrefixedArticleName,
-  stripArticleDatePrefix,
+  buildPublishedArticleName,
   formatIssueTitleFromArticleName,
   normalizeSoftwareProjectMappingsSetting,
   parseSoftwareProjectMappings,
