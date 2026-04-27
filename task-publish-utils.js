@@ -33,6 +33,10 @@ function resolveMeetingTopic(meetingTopic, fallbackFileBaseName) {
   return String(fallbackFileBaseName || "").trim();
 }
 
+function resolveMeetingSyncMode(target) {
+  return String(target?.noteId || "").trim() ? "note" : "issue";
+}
+
 function removeNumericHyphenPrefix(value) {
   return String(value || "").trim().replace(/^\d+-/, "").trim();
 }
@@ -410,6 +414,7 @@ function isTableSeparator(line) {
 module.exports = {
   hasRequiredPublishTag,
   resolveMeetingTopic,
+  resolveMeetingSyncMode,
   resolveTaskName,
   buildPublishedArticleName,
   formatIssueTitleFromArticleName,

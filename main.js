@@ -165,9 +165,6 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
     }
 
     const target = this.parseIssueTarget(issueUrl);
-    if (!target.noteId) {
-      throw new Error("相关链接需填写评论url");
-    }
     await this.backfillMeetingTopic(file);
     const cleanedMarkdown = this.removeFrontmatterKeysFromMarkdown(
       markdown,
@@ -175,8 +172,15 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
     );
     new Notice("开始上传图片并同步 GitLab 内容...");
     const renderedBody = await this.replaceLocalImages(file, cleanedMarkdown, target, token);
-    await this.updateNote(target, token, renderedBody);
-    new Notice("GitLab 评论已更新。");
+    const syncMode = resolveMeetingSyncMode(target);
+    if (syncMode === "note") {
+      await this.updateNote(target, token, renderedBody);
+      new Notice("GitLab 评论已更新。");
+      return;
+    }
+
+    await this.updateIssueDescription(target, token, renderedBody);
+    new Notice("GitLab Issue 正文已更新。");
   }
 
   async publishCurrentTask() {
@@ -1409,6 +1413,10 @@ function resolveMeetingTopic(meetingTopic, fallbackFileBaseName) {
     return normalizedMeetingTopic;
   }
   return String(fallbackFileBaseName || "").trim();
+}
+
+function resolveMeetingSyncMode(target) {
+  return String(target?.noteId || "").trim() ? "note" : "issue";
 }
 
 function removeNumericHyphenPrefix(value) {

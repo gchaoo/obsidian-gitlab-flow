@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const {
   hasRequiredPublishTag,
   resolveMeetingTopic,
+  resolveMeetingSyncMode,
   resolveTaskName,
   buildPublishedArticleName,
   formatIssueTitleFromArticleName,
@@ -46,6 +47,12 @@ test("resolveMeetingTopic falls back to file basename when meeting topic is empt
   assert.equal(resolveMeetingTopic("周会纪要", "会议纪要"), "周会纪要");
   assert.equal(resolveMeetingTopic("", "会议纪要"), "会议纪要");
   assert.equal(resolveMeetingTopic("   ", "会议纪要"), "会议纪要");
+});
+
+test("resolveMeetingSyncMode chooses issue body or note update by target link type", () => {
+  assert.equal(resolveMeetingSyncMode({ noteId: "123" }), "note");
+  assert.equal(resolveMeetingSyncMode({ noteId: "" }), "issue");
+  assert.equal(resolveMeetingSyncMode({}), "issue");
 });
 
 test("buildPublishedArticleName removes legacy date prefixes and appends a yyyymmdd suffix when missing", () => {
