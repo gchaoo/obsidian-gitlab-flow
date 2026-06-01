@@ -11,7 +11,7 @@ const DEFAULT_SETTINGS = {
 };
 
 const FILE_MENU_SECTION = "00-obsidian-gitlab-flow";
-const ISSUE_URL_RE = /https?:\/\/[^\s)\]]+\/-\/issues\/\d+(?:#note_\d+)?/g;
+const ISSUE_URL_RE = /https?:\/\/[^\s)\]]+\/-\/(?:issues|work_items)\/\d+(?:#note_\d+)?/g;
 const MARKDOWN_IMAGE_RE = /!\[([^\]]*)\]\(([^)]+)\)/g;
 const WIKI_IMAGE_RE = /!\[\[([^\]\n]+)\]\]/g;
 const IGNORED_MEETING_FRONTMATTER_KEYS = ["实时记录"];
@@ -171,7 +171,8 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
       this.getIgnoredMeetingFrontmatterKeys(),
     );
     new Notice("开始上传图片并同步 GitLab 内容...");
-    const renderedBody = await this.replaceLocalImages(file, cleanedMarkdown, target, token);
+    const expandedMarkdown = await this.expandObsidianMarkdownEmbeds(file, cleanedMarkdown);
+    const renderedBody = await this.replaceLocalImages(file, expandedMarkdown, target, token);
     const syncMode = resolveMeetingSyncMode(target);
     if (syncMode === "note") {
       await this.updateNote(target, token, renderedBody);
@@ -499,7 +500,7 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
   }
 
   parseIssueTarget(issueUrl) {
-    const match = issueUrl.match(/^(https?:\/\/[^/]+)(\/.+?)\/-\/issues\/(\d+)(?:#note_(\d+))?$/);
+    const match = issueUrl.match(/^(https?:\/\/[^/]+)(\/.+?)\/-\/(?:issues|work_items)\/(\d+)(?:#note_(\d+))?$/);
     if (!match) {
       throw new Error(`GitLab 链接格式不正确：${issueUrl}`);
     }
@@ -820,6 +821,44 @@ module.exports = class ObsidianGitlabFlowPlugin extends Plugin {
     }
 
     return output;
+  }
+
+  async expandObsidianMarkdownEmbeds(file, markdown) {
+    let output = markdown;
+    const wikiMatches = Array.from(output.matchAll(WIKI_IMAGE_RE));
+    for (const match of wikiMatches) {
+      const fullMatch = match[0];
+      const rawTarget = (match[1] || "").trim();
+      const embedTarget = parseObsidianEmbedTarget(rawTarget);
+      if (!embedTarget.isFragment) {
+        continue;
+      }
+      if (!embedTarget.isMarkdown) {
+        throw new Error(`文件片段引用仅支持 Markdown 文档：${rawTarget}`);
+      }
+
+      const fragmentMarkdown = await this.readObsidianMarkdownFragment(file, embedTarget, rawTarget);
+      output = output.replace(fullMatch, fragmentMarkdown);
+    }
+    return output;
+  }
+
+  async readObsidianMarkdownFragment(file, embedTarget, rawTarget) {
+    const linkedFile = embedTarget.filePath
+      ? this.app.metadataCache.getFirstLinkpathDest(embedTarget.filePath, file.path)
+      : file;
+    if (!linkedFile) {
+      throw new Error(`未找到文件片段引用：${rawTarget}`);
+    }
+    if (linkedFile.extension !== "md") {
+      throw new Error(`文件片段引用仅支持 Markdown 文档：${rawTarget}`);
+    }
+
+    const markdown = await this.app.vault.cachedRead(linkedFile);
+    const fragmentMarkdown = embedTarget.fragmentType === "block"
+      ? extractMarkdownBlockFragment(markdown, embedTarget.fragment)
+      : extractMarkdownHeadingFragment(markdown, embedTarget.fragment);
+    return rewriteRelativeMarkdownImagePaths(fragmentMarkdown, linkedFile.path, file.path);
   }
 
   async uploadMarkdownImage(file, imagePath, target, token) {
@@ -1419,6 +1458,121 @@ function resolveMeetingSyncMode(target) {
   return String(target?.noteId || "").trim() ? "note" : "issue";
 }
 
+function parseObsidianEmbedTarget(rawTarget) {
+  const targetWithoutAlias = String(rawTarget || "").split("|")[0].trim();
+  const hashIndex = targetWithoutAlias.indexOf("#");
+  const filePath = (hashIndex >= 0 ? targetWithoutAlias.slice(0, hashIndex) : targetWithoutAlias).trim();
+  const rawFragment = hashIndex >= 0 ? targetWithoutAlias.slice(hashIndex + 1).trim() : "";
+  const fragmentType = rawFragment.startsWith("^") ? "block" : rawFragment ? "heading" : "";
+  const fragment = fragmentType === "block" ? rawFragment.slice(1).trim() : rawFragment;
+  const extension = filePath.includes(".") ? filePath.split(".").pop().toLowerCase() : "";
+
+  return {
+    filePath,
+    fragment,
+    fragmentType,
+    isFragment: Boolean(fragment),
+    isMarkdown: !extension || extension === "md" || extension === "markdown",
+  };
+}
+
+function extractMarkdownHeadingFragment(markdown, heading) {
+  const expectedHeading = String(heading || "").trim();
+  const lines = String(markdown || "").replace(/\r\n/g, "\n").split("\n");
+  let startIndex = -1;
+  let headingLevel = 0;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = lines[index].match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (!match) {
+      continue;
+    }
+    const title = match[2].trim();
+    if (title === expectedHeading) {
+      startIndex = index + 1;
+      headingLevel = match[1].length;
+      break;
+    }
+  }
+
+  if (startIndex < 0) {
+    throw new Error(`未找到标题片段：${expectedHeading}`);
+  }
+
+  let endIndex = lines.length;
+  for (let index = startIndex; index < lines.length; index += 1) {
+    const match = lines[index].match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (match && match[1].length <= headingLevel) {
+      endIndex = index;
+      break;
+    }
+  }
+
+  return trimBlankLines(lines.slice(startIndex, endIndex)).join("\n");
+}
+
+function extractMarkdownBlockFragment(markdown, blockId) {
+  const normalizedBlockId = String(blockId || "").trim();
+  const lines = String(markdown || "").replace(/\r\n/g, "\n").split("\n");
+  const blockPattern = new RegExp(`(?:^|\\s)\\^${escapeRegExp(normalizedBlockId)}\\s*$`);
+  const targetIndex = lines.findIndex((line) => blockPattern.test(line));
+  if (targetIndex < 0) {
+    throw new Error(`未找到块引用：${normalizedBlockId}`);
+  }
+
+  let startIndex = targetIndex;
+  while (startIndex > 0 && lines[startIndex - 1].trim()) {
+    startIndex -= 1;
+  }
+
+  let endIndex = targetIndex + 1;
+  while (endIndex < lines.length && lines[endIndex].trim()) {
+    endIndex += 1;
+  }
+
+  const blockLines = lines.slice(startIndex, endIndex);
+  blockLines[targetIndex - startIndex] = blockLines[targetIndex - startIndex].replace(blockPattern, "").trimEnd();
+  return trimBlankLines(blockLines).join("\n");
+}
+
+function rewriteRelativeMarkdownImagePaths(markdown, sourceFilePath, currentFilePath) {
+  const sourceDir = path.posix.dirname(String(sourceFilePath || ""));
+  const currentDir = path.posix.dirname(String(currentFilePath || ""));
+
+  return String(markdown || "").replace(MARKDOWN_IMAGE_RE, (fullMatch, altText, rawImagePath) => {
+    const imagePath = String(rawImagePath || "").trim();
+    const cleanedPath = imagePath.replace(/^<|>$/g, "").trim();
+    if (!shouldRewriteMarkdownImagePath(cleanedPath)) {
+      return fullMatch;
+    }
+
+    const sourceImagePath = path.posix.normalize(path.posix.join(sourceDir, cleanedPath));
+    const relativePath = path.posix.relative(currentDir, sourceImagePath) || path.posix.basename(sourceImagePath);
+    return `![${altText}](${relativePath})`;
+  });
+}
+
+function shouldRewriteMarkdownImagePath(imagePath) {
+  if (!imagePath || imagePath.startsWith("#")) {
+    return false;
+  }
+  if (/^(?:[a-z][a-z\d+.-]*:)?\/\//i.test(imagePath) || /^[a-z][a-z\d+.-]*:/i.test(imagePath)) {
+    return false;
+  }
+  return !path.posix.isAbsolute(imagePath);
+}
+
+function trimBlankLines(lines) {
+  const output = [...lines];
+  while (output.length > 0 && !String(output[0] || "").trim()) {
+    output.shift();
+  }
+  while (output.length > 0 && !String(output[output.length - 1] || "").trim()) {
+    output.pop();
+  }
+  return output;
+}
+
 function removeNumericHyphenPrefix(value) {
   return String(value || "").trim().replace(/^\d+-/, "").trim();
 }
@@ -1548,11 +1702,7 @@ function buildPlmTaskName(metadata) {
   const segments = [];
   const contract = metadata.contract ? `【${metadata.contract}】` : "";
   const software = metadata.software ? `【${metadata.software}】` : "";
-  const taskType = String(metadata.taskType || "").trim();
   const normalizedTaskName = removeTrailingDateSuffix(metadata.taskName);
-  if (!taskType) {
-    throw new Error("任务安排表格中的 任务类型 为必填项。");
-  }
 
   if (contract) {
     segments.push(contract);
@@ -1560,7 +1710,7 @@ function buildPlmTaskName(metadata) {
   if (software) {
     segments.push(software);
   }
-  segments.push(`${normalizedTaskName}-${taskType}_${metadata.startDate.year}${metadata.startDate.month}${metadata.startDate.day}`);
+  segments.push(`${normalizedTaskName}_${metadata.startDate.year}${metadata.startDate.month}${metadata.startDate.day}`);
   return segments.join("");
 }
 
@@ -1594,11 +1744,6 @@ function updateLastTaskScheduleTable(body, metadata) {
   const normalizedRows = normalizedTable.rows;
   const plmTaskNameIndex = normalizedTable.plmTaskNameIndex;
 
-  const taskTypeIndex = normalizedHeaderCells.indexOf("任务类型");
-  if (taskTypeIndex < 0) {
-    throw new Error("任务安排表格缺少必要列。");
-  }
-
   const timeRangeIndex = normalizedHeaderCells.indexOf("时间范围");
   if (timeRangeIndex < 0) {
     throw new Error("任务安排表格缺少必要列。");
@@ -1614,7 +1759,6 @@ function updateLastTaskScheduleTable(body, metadata) {
       contract: metadata.contract,
       software: metadata.software,
       startDate: metadata.startDate,
-      taskType: dataCells[taskTypeIndex],
     });
     dataCells[timeRangeIndex] = buildTaskTimeRange(metadata.startDate, metadata.endDate);
     lines[dataRowIndex] = formatTableRow(dataCells);

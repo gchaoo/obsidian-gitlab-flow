@@ -5,6 +5,8 @@ const {
   hasRequiredPublishTag,
   resolveMeetingTopic,
   resolveMeetingSyncMode,
+  extractGitLabIssueTargetUrl,
+  parseGitLabIssueTargetUrl,
   resolveTaskName,
   buildPublishedArticleName,
   formatIssueTitleFromArticleName,
@@ -13,7 +15,11 @@ const {
   parseGitLabProjectUrl,
   parseImageWidthSpec,
   parseMarkdownImageWidth,
+  parseObsidianEmbedTarget,
   parseWikiImageTarget,
+  extractMarkdownBlockFragment,
+  extractMarkdownHeadingFragment,
+  rewriteRelativeMarkdownImagePaths,
   formatUploadedImageMarkdown,
   buildPlmTaskName,
   buildTaskTimeRange,
@@ -53,6 +59,121 @@ test("resolveMeetingSyncMode chooses issue body or note update by target link ty
   assert.equal(resolveMeetingSyncMode({ noteId: "123" }), "note");
   assert.equal(resolveMeetingSyncMode({ noteId: "" }), "issue");
   assert.equal(resolveMeetingSyncMode({}), "issue");
+});
+
+test("extractGitLabIssueTargetUrl accepts issue and work item urls", () => {
+  assert.equal(
+    extractGitLabIssueTargetUrl("目标 https://git.sansi.net:6101/group/project/-/issues/2058"),
+    "https://git.sansi.net:6101/group/project/-/issues/2058",
+  );
+  assert.equal(
+    extractGitLabIssueTargetUrl("目标 https://git.sansi.net:6101/group/project/-/work_items/2058#note_123"),
+    "https://git.sansi.net:6101/group/project/-/work_items/2058#note_123",
+  );
+  assert.equal(extractGitLabIssueTargetUrl("https://git.sansi.net:6101/group/project/-/merge_requests/1"), "");
+});
+
+test("parseGitLabIssueTargetUrl parses work item urls as issue targets", () => {
+  assert.deepEqual(
+    parseGitLabIssueTargetUrl(
+      "https://git.sansi.net:6101/led-display-platform/CCS/ccs-web-2/cyberhub-docs/-/work_items/2058#note_123",
+      (projectPath) => projectPath.replace(/^\//, "").replaceAll("/", "%2F"),
+    ),
+    {
+      baseUrl: "https://git.sansi.net:6101",
+      projectPath: "led-display-platform/CCS/ccs-web-2/cyberhub-docs",
+      project: "led-display-platform%2FCCS%2Fccs-web-2%2Fcyberhub-docs",
+      issueIid: "2058",
+      noteId: "123",
+    },
+  );
+});
+
+test("parseObsidianEmbedTarget parses markdown heading and block embeds", () => {
+  assert.deepEqual(parseObsidianEmbedTarget("需求.md#综合态势"), {
+    filePath: "需求.md",
+    fragment: "综合态势",
+    fragmentType: "heading",
+    isFragment: true,
+    isMarkdown: true,
+  });
+  assert.deepEqual(parseObsidianEmbedTarget("需求.md#^abc123"), {
+    filePath: "需求.md",
+    fragment: "abc123",
+    fragmentType: "block",
+    isFragment: true,
+    isMarkdown: true,
+  });
+  assert.deepEqual(parseObsidianEmbedTarget("需求#综合态势|别名"), {
+    filePath: "需求",
+    fragment: "综合态势",
+    fragmentType: "heading",
+    isFragment: true,
+    isMarkdown: true,
+  });
+  assert.deepEqual(parseObsidianEmbedTarget("image.png"), {
+    filePath: "image.png",
+    fragment: "",
+    fragmentType: "",
+    isFragment: false,
+    isMarkdown: false,
+  });
+});
+
+test("extractMarkdownHeadingFragment reads heading content until same or higher heading", () => {
+  const markdown = [
+    "# 项目",
+    "",
+    "## 综合态势",
+    "加动态效果",
+    "### 能耗统计",
+    "随季节变化",
+    "## 其他",
+    "不应包含",
+  ].join("\n");
+
+  assert.equal(
+    extractMarkdownHeadingFragment(markdown, "综合态势"),
+    ["加动态效果", "### 能耗统计", "随季节变化"].join("\n"),
+  );
+  assert.throws(() => extractMarkdownHeadingFragment(markdown, "不存在"), /未找到标题片段/);
+});
+
+test("extractMarkdownBlockFragment reads block content and removes block id", () => {
+  const markdown = [
+    "第一段",
+    "",
+    "- 屏幕还在采购中",
+    "- 屏的宽高尺寸还未确认 ^abc123",
+    "- 包柱屏",
+    "",
+    "结束",
+  ].join("\n");
+
+  assert.equal(
+    extractMarkdownBlockFragment(markdown, "abc123"),
+    ["- 屏幕还在采购中", "- 屏的宽高尺寸还未确认", "- 包柱屏"].join("\n"),
+  );
+  assert.throws(() => extractMarkdownBlockFragment(markdown, "missing"), /未找到块引用/);
+});
+
+test("rewriteRelativeMarkdownImagePaths resolves fragment images from the source file location", () => {
+  const markdown = [
+    "![](./assets/a.png)",
+    "![|315x267](assets/b.png)",
+    "![](https://example.com/remote.png)",
+    "![[image.png]]",
+  ].join("\n");
+
+  assert.equal(
+    rewriteRelativeMarkdownImagePaths(markdown, "projects/demo/source.md", "meetings/2026/week.md"),
+    [
+      "![](../../projects/demo/assets/a.png)",
+      "![|315x267](../../projects/demo/assets/b.png)",
+      "![](https://example.com/remote.png)",
+      "![[image.png]]",
+    ].join("\n"),
+  );
 });
 
 test("buildPublishedArticleName removes legacy date prefixes and appends a yyyymmdd suffix when missing", () => {
@@ -229,7 +350,7 @@ test("buildWorkItemDateSyncPayload includes start and due dates for work item up
   assert.match(payload.query, /errors/);
 });
 
-test("buildPlmTaskName uses contract, software, task name, row task type, and start date", () => {
+test("buildPlmTaskName uses contract, software, task name, and start date without task type", () => {
   const startDate = { raw: "2026-03-20", year: "2026", month: "03", day: "20" };
 
   assert.equal(
@@ -238,9 +359,8 @@ test("buildPlmTaskName uses contract, software, task name, row task type, and st
       software: "系统B",
       taskName: "收益测算",
       startDate,
-      taskType: "开发",
     }),
-    "【合同A】【系统B】收益测算-开发_20260320",
+    "【合同A】【系统B】收益测算_20260320",
   );
 
   assert.equal(
@@ -249,9 +369,8 @@ test("buildPlmTaskName uses contract, software, task name, row task type, and st
       software: "系统B",
       taskName: "收益测算",
       startDate,
-      taskType: "开发",
     }),
-    "【系统B】收益测算-开发_20260320",
+    "【系统B】收益测算_20260320",
   );
 
   assert.equal(
@@ -260,9 +379,8 @@ test("buildPlmTaskName uses contract, software, task name, row task type, and st
       software: "",
       taskName: "收益测算",
       startDate,
-      taskType: "开发",
     }),
-    "【合同A】收益测算-开发_20260320",
+    "【合同A】收益测算_20260320",
   );
 
   assert.equal(
@@ -271,9 +389,8 @@ test("buildPlmTaskName uses contract, software, task name, row task type, and st
       software: "",
       taskName: "收益测算",
       startDate,
-      taskType: "开发",
     }),
-    "收益测算-开发_20260320",
+    "收益测算_20260320",
   );
 
   assert.equal(
@@ -282,9 +399,8 @@ test("buildPlmTaskName uses contract, software, task name, row task type, and st
       software: "排班管理",
       taskName: "基础框架_20260324",
       startDate,
-      taskType: "2D设计",
     }),
-    "【排班管理】基础框架-2D设计_20260320",
+    "【排班管理】基础框架_20260320",
   );
 });
 
@@ -316,8 +432,8 @@ test("updateLastTaskScheduleTable keeps PLM task name column and updates plm tas
 
   assert.match(updated, /\| 旧任务 \| 张三 \| 2h \| 开发 \| 郭程豪 \| 2026-03-01～2026-03-02 \|/);
   assert.match(lastSection, /\| PLM任务名称 \| 执行人 \| 计划工时 \| 任务类型 \| 确认人 \| 时间范围 \|/);
-  assert.match(lastSection, /\| 【合同A】【系统B】收益测算-开发_20260320 \| 李四 \| 2h \| 开发 \| 郭程豪 \| 2026-03-20～2026-03-25 \|/);
-  assert.match(lastSection, /\| 【合同A】【系统B】收益测算-测试_20260320 \| 王五 \| 3h \| 测试 \| 郭程豪 \| 2026-03-20～2026-03-25 \|/);
+  assert.match(lastSection, /\| 【合同A】【系统B】收益测算_20260320 \| 李四 \| 2h \| 开发 \| 郭程豪 \| 2026-03-20～2026-03-25 \|/);
+  assert.match(lastSection, /\| 【合同A】【系统B】收益测算_20260320 \| 王五 \| 3h \| 测试 \| 郭程豪 \| 2026-03-20～2026-03-25 \|/);
 });
 
 test("updateLastTaskScheduleTable prepends PLM task name column when task schedule table lacks it", () => {
@@ -340,29 +456,29 @@ test("updateLastTaskScheduleTable prepends PLM task name column when task schedu
 
   assert.match(updated, /\| PLM任务名称 \| 执行人 \| 计划工时 \| 任务类型 \| 确认人 \| 时间范围 \|/);
   assert.match(updated, /\| --- \| --- \| --- \| --- \| --- \| --- \|/);
-  assert.match(updated, /\| 【合同A】【系统B】收益测算-开发_20260320 \| 李四 \| 2h \| 开发 \| 郭程豪 \| 2026-03-20～2026-03-25 \|/);
+  assert.match(updated, /\| 【合同A】【系统B】收益测算_20260320 \| 李四 \| 2h \| 开发 \| 郭程豪 \| 2026-03-20～2026-03-25 \|/);
 });
 
-test("updateLastTaskScheduleTable throws when any row lacks task type", () => {
+test("updateLastTaskScheduleTable ignores blank or missing task type values", () => {
   const original = [
     "## 任务安排",
     "",
-    "| PLM任务名称 | 执行人 | 计划工时 | 任务类型 | 确认人 | 时间范围 |",
-    "| --- | ---- | ---- | --- | ---- | ---- |",
-    "|  | 李四 | 2h |  | 郭程豪 |      |",
+    "| 执行人 | 计划工时 | 确认人 | 时间范围 |",
+    "| --- | ---- | --- | ---- |",
+    "| 李四 | 2h | 郭程豪 |      |",
     "",
   ].join("\n");
 
-  assert.throws(
-    () => updateLastTaskScheduleTable(original, {
-      taskName: "收益测算",
-      contract: "合同A",
-      software: "系统B",
-      startDate: { raw: "2026-03-20", year: "2026", month: "03", day: "20" },
-      endDate: { raw: "2026-03-25", year: "2026", month: "03", day: "25" },
-    }),
-    /任务类型/,
-  );
+  const updated = updateLastTaskScheduleTable(original, {
+    taskName: "收益测算",
+    contract: "合同A",
+    software: "系统B",
+    startDate: { raw: "2026-03-20", year: "2026", month: "03", day: "20" },
+    endDate: { raw: "2026-03-25", year: "2026", month: "03", day: "25" },
+  });
+
+  assert.match(updated, /\| PLM任务名称 \| 执行人 \| 计划工时 \| 确认人 \| 时间范围 \|/);
+  assert.match(updated, /\| 【合同A】【系统B】收益测算_20260320 \| 李四 \| 2h \| 郭程豪 \| 2026-03-20～2026-03-25 \|/);
 });
 
 test("extractAssigneeNamesFromLastTaskScheduleTable returns unique executor names from the last matching table", () => {

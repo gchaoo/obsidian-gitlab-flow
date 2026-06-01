@@ -1,3 +1,8 @@
+const path = require("path");
+
+const MARKDOWN_IMAGE_RE = /!\[([^\]]*)\]\(([^)]+)\)/g;
+const GITLAB_ISSUE_TARGET_URL_RE = /https?:\/\/[^\s)\]]+\/-\/(?:issues|work_items)\/\d+(?:#note_\d+)?/g;
+
 function normalizeTagValue(value) {
   const trimmed = String(value || "").trim();
   const wikiMatch = trimmed.match(/^\[\[([^|\]]+)(?:\|([^\]]+))?\]\]$/);
@@ -35,6 +40,153 @@ function resolveMeetingTopic(meetingTopic, fallbackFileBaseName) {
 
 function resolveMeetingSyncMode(target) {
   return String(target?.noteId || "").trim() ? "note" : "issue";
+}
+
+function extractGitLabIssueTargetUrl(value) {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = extractGitLabIssueTargetUrl(item);
+      if (found) {
+        return found;
+      }
+    }
+    return "";
+  }
+  const text = String(value || "");
+  const matched = text.match(GITLAB_ISSUE_TARGET_URL_RE);
+  return matched?.[0] || "";
+}
+
+function parseGitLabIssueTargetUrl(issueUrl, encodeProjectPathFn = encodeProjectPath) {
+  const match = String(issueUrl || "").match(/^(https?:\/\/[^/]+)(\/.+?)\/-\/(?:issues|work_items)\/(\d+)(?:#note_(\d+))?$/);
+  if (!match) {
+    throw new Error(`GitLab 链接格式不正确：${issueUrl}`);
+  }
+
+  const [, baseUrl, projectPath, issueIid, noteId] = match;
+  const normalizedProjectPath = projectPath.replace(/^\//, "");
+  return {
+    baseUrl,
+    projectPath: normalizedProjectPath,
+    project: encodeProjectPathFn(projectPath),
+    issueIid,
+    noteId: noteId || "",
+  };
+}
+
+function parseObsidianEmbedTarget(rawTarget) {
+  const targetWithoutAlias = String(rawTarget || "").split("|")[0].trim();
+  const hashIndex = targetWithoutAlias.indexOf("#");
+  const filePath = (hashIndex >= 0 ? targetWithoutAlias.slice(0, hashIndex) : targetWithoutAlias).trim();
+  const rawFragment = hashIndex >= 0 ? targetWithoutAlias.slice(hashIndex + 1).trim() : "";
+  const fragmentType = rawFragment.startsWith("^") ? "block" : rawFragment ? "heading" : "";
+  const fragment = fragmentType === "block" ? rawFragment.slice(1).trim() : rawFragment;
+  const extension = filePath.includes(".") ? filePath.split(".").pop().toLowerCase() : "";
+
+  return {
+    filePath,
+    fragment,
+    fragmentType,
+    isFragment: Boolean(fragment),
+    isMarkdown: !extension || extension === "md" || extension === "markdown",
+  };
+}
+
+function extractMarkdownHeadingFragment(markdown, heading) {
+  const expectedHeading = String(heading || "").trim();
+  const lines = String(markdown || "").replace(/\r\n/g, "\n").split("\n");
+  let startIndex = -1;
+  let headingLevel = 0;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = lines[index].match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (!match) {
+      continue;
+    }
+    const title = match[2].trim();
+    if (title === expectedHeading) {
+      startIndex = index + 1;
+      headingLevel = match[1].length;
+      break;
+    }
+  }
+
+  if (startIndex < 0) {
+    throw new Error(`未找到标题片段：${expectedHeading}`);
+  }
+
+  let endIndex = lines.length;
+  for (let index = startIndex; index < lines.length; index += 1) {
+    const match = lines[index].match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (match && match[1].length <= headingLevel) {
+      endIndex = index;
+      break;
+    }
+  }
+
+  return trimBlankLines(lines.slice(startIndex, endIndex)).join("\n");
+}
+
+function extractMarkdownBlockFragment(markdown, blockId) {
+  const normalizedBlockId = String(blockId || "").trim();
+  const lines = String(markdown || "").replace(/\r\n/g, "\n").split("\n");
+  const blockPattern = new RegExp(`(?:^|\\s)\\^${escapeRegExp(normalizedBlockId)}\\s*$`);
+  const targetIndex = lines.findIndex((line) => blockPattern.test(line));
+  if (targetIndex < 0) {
+    throw new Error(`未找到块引用：${normalizedBlockId}`);
+  }
+
+  let startIndex = targetIndex;
+  while (startIndex > 0 && lines[startIndex - 1].trim()) {
+    startIndex -= 1;
+  }
+
+  let endIndex = targetIndex + 1;
+  while (endIndex < lines.length && lines[endIndex].trim()) {
+    endIndex += 1;
+  }
+
+  const blockLines = lines.slice(startIndex, endIndex);
+  blockLines[targetIndex - startIndex] = blockLines[targetIndex - startIndex].replace(blockPattern, "").trimEnd();
+  return trimBlankLines(blockLines).join("\n");
+}
+
+function rewriteRelativeMarkdownImagePaths(markdown, sourceFilePath, currentFilePath) {
+  const sourceDir = path.posix.dirname(String(sourceFilePath || ""));
+  const currentDir = path.posix.dirname(String(currentFilePath || ""));
+
+  return String(markdown || "").replace(MARKDOWN_IMAGE_RE, (fullMatch, altText, rawImagePath) => {
+    const imagePath = String(rawImagePath || "").trim();
+    const cleanedPath = imagePath.replace(/^<|>$/g, "").trim();
+    if (!shouldRewriteMarkdownImagePath(cleanedPath)) {
+      return fullMatch;
+    }
+
+    const sourceImagePath = path.posix.normalize(path.posix.join(sourceDir, cleanedPath));
+    const relativePath = path.posix.relative(currentDir, sourceImagePath) || path.posix.basename(sourceImagePath);
+    return `![${altText}](${relativePath})`;
+  });
+}
+
+function shouldRewriteMarkdownImagePath(imagePath) {
+  if (!imagePath || imagePath.startsWith("#")) {
+    return false;
+  }
+  if (/^(?:[a-z][a-z\d+.-]*:)?\/\//i.test(imagePath) || /^[a-z][a-z\d+.-]*:/i.test(imagePath)) {
+    return false;
+  }
+  return !path.posix.isAbsolute(imagePath);
+}
+
+function trimBlankLines(lines) {
+  const output = [...lines];
+  while (output.length > 0 && !String(output[0] || "").trim()) {
+    output.shift();
+  }
+  while (output.length > 0 && !String(output[output.length - 1] || "").trim()) {
+    output.pop();
+  }
+  return output;
 }
 
 function removeNumericHyphenPrefix(value) {
@@ -257,11 +409,7 @@ function buildPlmTaskName(metadata) {
   const segments = [];
   const contract = metadata.contract ? `【${metadata.contract}】` : "";
   const software = metadata.software ? `【${metadata.software}】` : "";
-  const taskType = String(metadata.taskType || "").trim();
   const normalizedTaskName = removeTrailingDateSuffix(metadata.taskName);
-  if (!taskType) {
-    throw new Error("任务安排表格中的 任务类型 为必填项。");
-  }
 
   if (contract) {
     segments.push(contract);
@@ -269,7 +417,7 @@ function buildPlmTaskName(metadata) {
   if (software) {
     segments.push(software);
   }
-  segments.push(`${normalizedTaskName}-${taskType}_${metadata.startDate.year}${metadata.startDate.month}${metadata.startDate.day}`);
+  segments.push(`${normalizedTaskName}_${metadata.startDate.year}${metadata.startDate.month}${metadata.startDate.day}`);
   return segments.join("");
 }
 
@@ -303,11 +451,6 @@ function updateLastTaskScheduleTable(body, metadata) {
   const normalizedRows = normalizedTable.rows;
   const plmTaskNameIndex = normalizedTable.plmTaskNameIndex;
 
-  const taskTypeIndex = normalizedHeaderCells.indexOf("任务类型");
-  if (taskTypeIndex < 0) {
-    throw new Error("任务安排表格缺少必要列。");
-  }
-
   const timeRangeIndex = normalizedHeaderCells.indexOf("时间范围");
   if (timeRangeIndex < 0) {
     throw new Error("任务安排表格缺少必要列。");
@@ -323,7 +466,6 @@ function updateLastTaskScheduleTable(body, metadata) {
       contract: metadata.contract,
       software: metadata.software,
       startDate: metadata.startDate,
-      taskType: dataCells[taskTypeIndex],
     });
     dataCells[timeRangeIndex] = buildTaskTimeRange(metadata.startDate, metadata.endDate);
     lines[dataRowIndex] = formatTableRow(dataCells);
@@ -411,10 +553,20 @@ function isTableSeparator(line) {
   return /^\|\s*[-: ]+(?:\|\s*[-: ]+)+\|\s*$/.test(line.trim());
 }
 
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 module.exports = {
   hasRequiredPublishTag,
   resolveMeetingTopic,
   resolveMeetingSyncMode,
+  extractGitLabIssueTargetUrl,
+  parseGitLabIssueTargetUrl,
+  parseObsidianEmbedTarget,
+  extractMarkdownBlockFragment,
+  extractMarkdownHeadingFragment,
+  rewriteRelativeMarkdownImagePaths,
   resolveTaskName,
   buildPublishedArticleName,
   formatIssueTitleFromArticleName,
